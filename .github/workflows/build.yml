@@ -68,6 +68,30 @@ jobs:
           name: release-archives
           path: "*.zip"
 
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    if: github.ref != 'refs/tags/nightly'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      # 32-bit builds are released too, and some sizes overflow only there
+      - name: Test (32-bit)
+        run: GOARCH=386 go test ./...
+
   release-tag:
     name: Release (tagged)
     needs: build
