@@ -105,6 +105,9 @@ func (c *CSO) checkHeader() error {
 	if c.size%int64(c.blockSize) != 0 {
 		numBlocks++
 	}
+	if numBlocks > common.MaxBlocks {
+		return fmt.Errorf("invalid CSO: %d blocks is more than a disc image has", numBlocks)
+	}
 	if numBlocks >= (c.fileSize-24)/4 {
 		return fmt.Errorf("invalid CSO: block map for %d blocks does not fit into the file", numBlocks)
 	}

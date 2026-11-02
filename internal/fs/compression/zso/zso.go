@@ -118,6 +118,9 @@ func (z *ZSO) checkHeader() error {
 	if z.size%int64(z.blockSize) != 0 {
 		numBlocks++
 	}
+	if numBlocks > common.MaxBlocks {
+		return fmt.Errorf("invalid ZSO: %d blocks is more than a disc image has", numBlocks)
+	}
 	endEntries := int64(0)
 	if z.ziso {
 		endEntries = 1

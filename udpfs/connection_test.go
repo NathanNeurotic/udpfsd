@@ -909,6 +909,8 @@ func TestCorruptCompressedImageListing(t *testing.T) {
 	}{
 		{"huge.zso", compressedImage("ZISO", 1<<62, 1, []uint32{0}, 0)},
 		{"negative.cso", compressedImage("CISO", 1<<63, 2048, nil, 0)},
+		{"truncated.cso", compressedImage("CISO", 1<<20, 1, []uint32{0}, 0)}, // block map longer than the file
+		{"truncated.zso", compressedImage("ZISO", 1<<20, 1, []uint32{0}, 0)},
 		{"zero.zso", compressedImage("ZISO", 4096, 0, []uint32{0, 0, 0}, 0)}, // block size 0
 	}
 	var want []dirEntry
@@ -1011,5 +1013,40 @@ func TestPathOutsideRoot(t *testing.T) {
 	}
 	if data, err := os.ReadFile(outside); err != nil || string(data) != "ELF" {
 		t.Errorf("file outside of the served directory: %q, %v; want \"ELF\"", data, err)
+	}
+}
+
+// A compressed image whose header claims more blocks than a disc image has is
+// refused even when its block map fits into the file, instead of reading the map
+func TestCompressedImageWithTooManyBlocks(t *testing.T) {
+	p := newPeer(t, fs.WithCompression())
+	const blocks = 1<<25 + 1 // of one byte each
+	// The header, an entry for every block and one for the end of the last block
+	const size = 24 + (blocks+1)*4
+	var want []dirEntry
+	for _, img := range []struct{ name, magic string }{{"huge.cso", "CISO"}, {"huge.zso", "ZISO"}} {
+		f, err := os.Create(p.hostPath(img.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.Write(compressedImage(img.magic, blocks, 1, nil, 0))
+		if err == nil {
+			err = f.Truncate(size) // sparse where the file system allows it
+		}
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, dirEntry{img.name, udpfs.FIO_S_IFREG, size})
+	}
+	if got := p.list(""); !slices.Equal(got, want) {
+		t.Errorf("listing: %+v, want %+v", got, want)
+	}
+	for _, img := range want {
+		if h := p.open(img.name+".iso", fioRdonly); h != -udpfs.ENOENT {
+			t.Errorf("OPEN %s.iso: %d, want %d", img.name, h, -udpfs.ENOENT)
+		}
 	}
 }
