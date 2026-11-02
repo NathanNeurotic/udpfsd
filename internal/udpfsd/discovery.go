@@ -35,6 +35,12 @@ func (s *Server) discoveryHandler() {
 			log.Printf("udpfsd/discovery: [%s]: %v", addr, err)
 			continue
 		}
+		// A known peer discovering the server again is about to start a new session
+		s.Lock()
+		if p, ok := s.cMap[addr.AddrPort()]; ok && p.Connection != nil {
+			p.GetUDPRDMASession().PeerDiscovered()
+		}
+		s.Unlock()
 		s.dataConn.WriteToUDP(reply, addr)
 		log.Printf("[%s]: discovery request received", addr)
 	}
