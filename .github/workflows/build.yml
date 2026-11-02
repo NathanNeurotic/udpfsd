@@ -3,9 +3,11 @@ name: Build and Release
 on:
   push:
     branches:
-      - "*"
+      # "**" also matches branch names containing "/", which "*" skips
+      - "**"
     tags:
       - "v*"
+  pull_request:
   workflow_dispatch:
 
 # Avoid running again when we push the nightly tag
