@@ -105,3 +105,8 @@ func udpfsFlagsToOSFlags(flags uint16) int {
 
 	return os.O_RDONLY
 }
+
+// Reports whether OS flags open a file without writing, creating or truncating it
+func isReadOnlyOpen(flag int) bool {
+	return flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND) == 0
+}

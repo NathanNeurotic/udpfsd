@@ -76,13 +76,23 @@ func (c *Connection) handleOpen(addr *net.UDPAddr, payload []byte) int {
 	flag := udpfsFlagsToOSFlags(flags)
 
 	if !isDir {
-		// Retrieve cached file handle if peer was reset and tries to open the same file again
-		if h, ok := c.lookupHandle(path, flag); ok {
-			if c.verbose {
-				log.Printf("[%s]: reusing file handle %d for %s (mode %x)", addr, h, path, flag)
+		// Retrieve cached file handle if peer was reset and tries to open the same file for reading again
+		if isReadOnlyOpen(flag) {
+			if h, ok := c.lookupHandle(path, flag); ok {
+				if c.verbose {
+					log.Printf("[%s]: reusing file handle %d for %s (mode %x)", addr, h, path, flag)
+				}
+				c.SendOpenReply(addr, h, StatInfo{})
+				return 0
 			}
-			c.SendOpenReply(addr, h, StatInfo{})
-			return 0
+		}
+		// Close any other handle a peer reset left on this path: it still points to the file
+		// that was there when it was opened, which may have been removed or replaced since,
+		// and while it is open the backend refuses to open the file for writing,
+		// or for reading if the handle was opened for writing.
+		// Opening the path again applies O_CREAT and O_TRUNC to the current file.
+		if n := c.closeResetHandles(path); n > 0 && c.verbose {
+			log.Printf("[%s]: closed %d file handle(s) left open for %s by peer reset", addr, n, path)
 		}
 	}
 
