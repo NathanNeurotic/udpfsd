@@ -100,7 +100,7 @@ func (z *ZSO) checkHeader() error {
 	if z.ziso {
 		z.align = b[21]
 	}
-	if z.blockSize <= 0 {
+	if z.blockSize <= 0 || z.blockSize > common.MaxBlockSize {
 		return fmt.Errorf("invalid ZSO: block_size is %d", z.blockSize)
 	}
 	if z.size < 0 {

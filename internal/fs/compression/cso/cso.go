@@ -87,7 +87,7 @@ func (c *CSO) checkHeader() error {
 	c.size = int64(binary.LittleEndian.Uint64(b[8:16]))
 	c.blockSize = int(binary.LittleEndian.Uint32(b[16:20]))
 	c.align = b[21]
-	if c.blockSize <= 0 {
+	if c.blockSize <= 0 || c.blockSize > common.MaxBlockSize {
 		return fmt.Errorf("invalid CSO: block_size is %d", c.blockSize)
 	}
 	if c.size < 0 {

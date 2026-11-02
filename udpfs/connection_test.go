@@ -2,6 +2,7 @@ package udpfs_test
 
 import (
 	"bytes"
+	"compress/flate"
 	"encoding/binary"
 	"net"
 	"os"
@@ -907,6 +908,9 @@ func TestCorruptCompressedImageListing(t *testing.T) {
 		name string
 		data []byte
 	}{
+		// One block of 2 GB, which READ would have to allocate
+		{"big.cso", compressedImage("CISO", 2048, 0x7FFFFFFF, []uint32{32, 48}, 16)},
+		{"big.zso", compressedImage("ZISO", 2048, 0x7FFFFFFF, []uint32{32 | 0x80000000, 48}, 16)},
 		{"huge.zso", compressedImage("ZISO", 1<<62, 1, []uint32{0}, 0)},
 		{"negative.cso", compressedImage("CISO", 1<<63, 2048, nil, 0)},
 		{"truncated.cso", compressedImage("CISO", 1<<20, 1, []uint32{0}, 0)}, // block map longer than the file
@@ -1047,6 +1051,56 @@ func TestCompressedImageWithTooManyBlocks(t *testing.T) {
 	for _, img := range want {
 		if h := p.open(img.name+".iso", fioRdonly); h != -udpfs.ENOENT {
 			t.Errorf("OPEN %s.iso: %d, want %d", img.name, h, -udpfs.ENOENT)
+		}
+	}
+}
+
+// deflated compresses data with raw deflate, as CSO blocks are
+func deflated(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	w, err := flate.NewWriter(&b, flate.BestCompression)
+	if err == nil {
+		_, err = w.Write(data)
+	}
+	if err == nil {
+		err = w.Close()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// Compressed images with blocks of up to 1 MB are served: maxcso writes
+// blocks of up to 256 KB
+func TestCompressedImageLargeBlocks(t *testing.T) {
+	p := newPeer(t, fs.WithCompression())
+	const blockSize = 1 << 20
+	data := bytes.Repeat([]byte("0123456789ABCDEF"), blockSize/16)
+	z := deflated(t, data)
+	images := map[string][]byte{
+		// One block, deflated
+		"a.cso": append(compressedImage("CISO", blockSize, blockSize, []uint32{32, 32 + uint32(len(z))}, 0), z...),
+		// One block, stored uncompressed
+		"b.zso": append(compressedImage("ZISO", blockSize, blockSize, []uint32{32 | 0x80000000, 32 + blockSize}, 0), data...),
+	}
+	for name, img := range images {
+		if err := os.WriteFile(p.hostPath(name), img, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []dirEntry{{"a.cso.iso", udpfs.FIO_S_IFREG, blockSize}, {"b.zso.iso", udpfs.FIO_S_IFREG, blockSize}}
+	if got := p.list(""); !slices.Equal(got, want) {
+		t.Fatalf("listing: %+v, want %+v", got, want)
+	}
+	for _, e := range want {
+		h := p.open(e.name, fioRdonly)
+		if h <= 0 {
+			t.Fatalf("OPEN %s: %d", e.name, h)
+		}
+		if got := p.read(h, 64); !bytes.Equal(got, data[:64]) {
+			t.Errorf("READ %s: %q, want %q", e.name, got, data[:64])
 		}
 	}
 }
