@@ -93,43 +93,51 @@ func (s *Backend) allocHandle(h handle) int32 {
 	return -udpfs.EMFILE
 }
 
+// Converts an external handle to an index in s.handles.
+// Handles come from the network, so anything outside of the table is rejected.
+func handleIndex(handle int32) (int, bool) {
+	// Handle 0 is reserved for block device, so our external handles start with 1
+	if handle < 1 || handle > maxHandles {
+		return 0, false
+	}
+	return int(handle - 1), true
+}
+
 func (s *Backend) freeHandle(handle int32) bool {
 	if handle == udpfs.BlockDeviceHandle {
 		// Block device is opened for server lifetime
 		return true
 	}
+	idx, ok := handleIndex(handle)
+	if !ok {
+		return false
+	}
 	s.Lock()
 	defer s.Unlock()
 
-	// Handle 0 is reserved for block device, so our external handles start with 1
-	handle = handle - 1
-
-	if h := s.handles[handle]; h != nil {
+	if h := s.handles[idx]; h != nil {
 		h.Close()
-		s.handles[handle] = nil
+		s.handles[idx] = nil
 		return true
 	}
 	return true
 }
 
 func (s *Backend) getFile(handle int32) *fileHandle {
-	if handle < 0 {
-		return nil
-	}
-
 	if handle == udpfs.BlockDeviceHandle {
 		if s.bdHandle == nil {
 			return nil
 		}
 		return s.bdHandle.fileHandle
 	}
+	idx, ok := handleIndex(handle)
+	if !ok {
+		return nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
-	// Handle 0 is reserved for block device, so our external handles start with 1
-	handle = handle - 1
-
-	h := s.handles[handle]
+	h := s.handles[idx]
 	if h == nil {
 		return nil
 	}
@@ -137,7 +145,7 @@ func (s *Backend) getFile(handle int32) *fileHandle {
 	if !ok {
 		return nil
 	}
-	s.lastUsed[handle] = time.Now()
+	s.lastUsed[idx] = time.Now()
 	return fh
 }
 
@@ -170,13 +178,14 @@ func (s *Backend) getFileState(hostPath string) (open bool, readOnly bool) {
 }
 
 func (s *Backend) getDir(handle int32) *dirHandle {
+	idx, ok := handleIndex(handle)
+	if !ok {
+		return nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
-	// Handle 0 is reserved for block device, so our external handles start with 1
-	handle = handle - 1
-
-	h := s.handles[handle]
+	h := s.handles[idx]
 	if h == nil {
 		return nil
 	}
@@ -184,7 +193,7 @@ func (s *Backend) getDir(handle int32) *dirHandle {
 	if !ok {
 		return nil
 	}
-	s.lastUsed[handle] = time.Now()
+	s.lastUsed[idx] = time.Now()
 	return dh
 }
 

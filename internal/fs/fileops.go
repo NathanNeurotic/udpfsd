@@ -126,6 +126,10 @@ func (s *Backend) Read(handle int32, size uint32, readBuffer []byte) (int32, []b
 	f.Lock()
 	defer f.Unlock()
 
+	// Every reply has to fit into readBuffer
+	if int64(size) > int64(len(readBuffer)) {
+		return 0, nil, udpfs.Errno(-udpfs.EINVAL)
+	}
 	read, err := f.Read(readBuffer[:size])
 	if err != nil && err != os.ErrClosed && err != io.EOF {
 		log.Printf("fs: failed to read file %s: %v", f.Name(), err)
@@ -361,13 +365,18 @@ func (s *Backend) Bread(handle int32, sectorNr int64, sectorCount uint16, readBu
 	if handle != udpfs.BlockDeviceHandle {
 		sectorSize = 512
 	}
+	// Every reply has to fit into readBuffer
+	size := int64(sectorCount) * int64(sectorSize)
+	if size < 0 || size > int64(len(readBuffer)) {
+		return nil, udpfs.Errno(-udpfs.EINVAL)
+	}
 
 	_, err := f.Seek(sectorNr*int64(sectorSize), io.SeekStart)
 	if err != nil {
 		return nil, err
 	}
 
-	n, err := f.Read(readBuffer[:int(sectorCount)*sectorSize])
+	n, err := f.Read(readBuffer[:size])
 	if err != nil && err != io.EOF {
 		log.Printf("fs: failed to read %s: %v", f.Name(), err)
 		return nil, err

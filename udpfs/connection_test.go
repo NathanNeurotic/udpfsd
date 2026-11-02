@@ -494,3 +494,84 @@ func TestMkdirExistingPath(t *testing.T) {
 		t.Errorf("MKDIR where a file exists: %d, want %d", r, -udpfs.EEXIST)
 	}
 }
+
+// A request with a handle the server never returned, or asking for more data
+// than fits into one reply, gets an error reply and the server keeps running
+func TestInvalidHandleOrSize(t *testing.T) {
+	p := newPeer(t)
+	data := []byte("ELF data")
+	if err := os.WriteFile(p.hostPath("OPL.ELF"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := p.open("OPL.ELF", fioRdonly)
+	if h <= 0 {
+		t.Fatalf("OPEN: %d", h)
+	}
+
+	// req builds a request of size bytes with the handle at offset 4 and sets
+	// the 16-bit field at offset 2 (sector_count) or 8 (size) when given
+	req := func(msg udpfs.MsgType, size int, handle int32, field16 uint16, size32 uint32) []byte {
+		r := make([]byte, size)
+		r[0] = byte(msg)
+		binary.LittleEndian.PutUint16(r[2:], field16)
+		binary.LittleEndian.PutUint32(r[4:], uint32(handle))
+		if size >= 12 {
+			binary.LittleEndian.PutUint32(r[8:], size32)
+		}
+		return r
+	}
+	chunk := func(r []byte) []byte {
+		// WRITE_DATA header of a single 4-byte chunk, and the chunk
+		return append(r, byte(udpfs.MsgWriteData), 0, 0, 0, 4, 0, 1, 0, 'D', 'A', 'T', 'A')
+	}
+	for _, tc := range []struct {
+		name  string
+		req   []byte
+		reply udpfs.MsgType
+	}{
+		{"CLOSE 1000", req(udpfs.MsgCloseReq, 8, 1000, 0, 0), udpfs.MsgCloseReply},
+		{"CLOSE -5", req(udpfs.MsgCloseReq, 8, -5, 0, 0), udpfs.MsgCloseReply},
+		{"READ 1000", req(udpfs.MsgReadReq, 12, 1000, 0, 16), udpfs.MsgResultReply},
+		{"WRITE 1000", chunk(req(udpfs.MsgWriteReq, 12, 1000, 0, 4)), udpfs.MsgWriteDone},
+		{"LSEEK 1000", req(udpfs.MsgLseekReq, 16, 1000, 0, 0), udpfs.MsgLseekReply},
+		{"DREAD 0", req(udpfs.MsgDreadReq, 8, 0, 0, 0), udpfs.MsgDreadReply},
+		{"DREAD 1000", req(udpfs.MsgDreadReq, 8, 1000, 0, 0), udpfs.MsgDreadReply},
+		{"DREAD -5", req(udpfs.MsgDreadReq, 8, -5, 0, 0), udpfs.MsgDreadReply},
+		{"BREAD 1000", req(udpfs.MsgBreadReq, 16, 1000, 1, 0), udpfs.MsgResultReply},
+		{"BWRITE 1000", chunk(req(udpfs.MsgBwriteReq, 16, 1000, 1, 0)), udpfs.MsgWriteDone},
+		{"READ of 256 MB", req(udpfs.MsgReadReq, 12, h, 0, 256<<20), udpfs.MsgResultReply},
+		{"BREAD of 65535 sectors", req(udpfs.MsgBreadReq, 16, h, 0xFFFF, 0), udpfs.MsgResultReply},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: server panicked: %v", tc.name, r)
+				}
+			}()
+			if res := result(p.request(tc.req, tc.reply)); res >= 0 {
+				t.Errorf("%s: %d, want an error", tc.name, res)
+			}
+		}()
+	}
+
+	if got := p.read(h, 64); !bytes.Equal(got, data) {
+		t.Fatalf("READ of an open file afterwards: %q, want %q", got, data)
+	}
+
+	// 65535 sectors of 64 KB overflow a 32-bit int
+	disk := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(disk, make([]byte, 64*512), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p = newPeer(t, fs.WithBlockDevice(disk), fs.WithSectorSize(64<<10))
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("BREAD of 65535 sectors of 64 KB: server panicked: %v", r)
+			}
+		}()
+		if res := result(p.request(req(udpfs.MsgBreadReq, 16, udpfs.BlockDeviceHandle, 0xFFFF, 0), udpfs.MsgResultReply)); res >= 0 {
+			t.Errorf("BREAD of 65535 sectors of 64 KB: %d, want an error", res)
+		}
+	}()
+}
