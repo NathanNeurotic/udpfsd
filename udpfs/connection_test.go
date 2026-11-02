@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -878,37 +879,49 @@ func (p *peer) copyTestImage(name, path string) {
 	}
 }
 
-// openFiles returns the number of files open in this process
-func openFiles(t *testing.T) int {
+// openFiles returns the number of files this process has open in dir, dir
+// included. Files that other tests left for the garbage collector to close,
+// which it can do at any time, don't count.
+func openFiles(t *testing.T, dir string) int {
 	t.Helper()
 	entries, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
 		t.Skipf("cannot count open files: %v", err)
 	}
-	return len(entries)
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range entries {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err == nil && (target == dir || strings.HasPrefix(target, dir+string(filepath.Separator))) {
+			n++
+		}
+	}
+	return n
 }
 
 // Listing compressed images and GETSTAT of their .iso names read the image
 // headers, and must close the images afterwards
 func TestCompressedImageStatClosesFiles(t *testing.T) {
-	openFiles(t) // skip early where open files cannot be counted
 	p := newPeer(t, fs.WithCompression())
+	openFiles(t, p.root) // skip early where open files cannot be counted
 	p.copyTestImage("test.cso", "a.cso")
 	p.copyTestImage("test.zso", "b.zso")
 	// The garbage collector closes files nothing refers to, which would hide a leak
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 
-	before := openFiles(t)
+	before := openFiles(t, p.root)
 	for range 10 {
 		if got := p.list(""); len(got) != 2 {
 			t.Fatalf("listing: %+v, want 2 entries", got)
 		}
 	}
-	if leaked := openFiles(t) - before; leaked != 0 {
+	if leaked := openFiles(t, p.root) - before; leaked != 0 {
 		t.Errorf("listing 2 compressed images 10 times left %d files open", leaked)
 	}
 
-	before = openFiles(t)
+	before = openFiles(t, p.root)
 	for range 10 {
 		for _, name := range []string{"a.cso.iso", "b.zso.iso"} {
 			if res, _ := p.getstat(name); res != 0 {
@@ -916,7 +929,7 @@ func TestCompressedImageStatClosesFiles(t *testing.T) {
 			}
 		}
 	}
-	if leaked := openFiles(t) - before; leaked != 0 {
+	if leaked := openFiles(t, p.root) - before; leaked != 0 {
 		t.Errorf("GETSTAT of 2 compressed images 10 times left %d files open", leaked)
 	}
 }
