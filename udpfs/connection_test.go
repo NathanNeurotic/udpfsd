@@ -931,6 +931,42 @@ func TestCorruptCompressedImageListing(t *testing.T) {
 	}
 }
 
+// OPEN of a compressed image replies with the size and time of the ISO image,
+// as it does for a plain file
+func TestOpenCompressedImageStat(t *testing.T) {
+	p := newPeer(t, fs.WithCompression())
+	iso, err := os.Stat("../internal/fs/compression/test/test.iso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtime := time.Date(2024, time.March, 5, 6, 7, 8, 0, time.Local)
+	ps2Time := [8]byte{0, 8, 7, 6, 5, 3, 0xE8, 0x07} // 2024-03-05 06:07:08
+	want := udpfs.StatInfo{Mode: udpfs.FIO_S_IFREG, Size: uint32(iso.Size()), Ctime: ps2Time, Mtime: ps2Time}
+
+	for _, image := range []string{"test.cso", "test.zso"} {
+		p.copyTestImage(image, image)
+		if err := os.Chtimes(p.hostPath(image), mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		req := make([]byte, 8)
+		req[0] = byte(udpfs.MsgOpenReq)
+		binary.LittleEndian.PutUint16(req[2:], fioRdonly)
+		reply := p.request(withPath(req, image+".iso"), udpfs.MsgOpenReply)
+		if h := result(reply); h <= 0 {
+			t.Fatalf("OPEN %s.iso: %d", image, h)
+		}
+		var got udpfs.StatInfo // OPEN_REPLY has no attr and atime
+		got.Mode = binary.LittleEndian.Uint32(reply[8:])
+		got.Size = binary.LittleEndian.Uint32(reply[12:])
+		got.Hisize = binary.LittleEndian.Uint32(reply[16:])
+		copy(got.Ctime[:], reply[20:])
+		copy(got.Mtime[:], reply[28:])
+		if got != want {
+			t.Errorf("OPEN_REPLY of %s.iso: %+v, want %+v", image, got, want)
+		}
+	}
+}
+
 // REMOVE and RMDIR never remove the served directory itself, even when it is empty
 func TestRemoveRoot(t *testing.T) {
 	p := newPeer(t)
