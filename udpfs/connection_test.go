@@ -377,6 +377,34 @@ func TestReopenForReadingAfterResetReusesHandle(t *testing.T) {
 	}
 }
 
+// A file the console was reading when it was reset and then removed is gone:
+// the handle the reset left must not keep it visible to GETSTAT and OPEN
+func TestRemoveAfterResetWhileOpenForReading(t *testing.T) {
+	p := newPeer(t)
+	if err := os.WriteFile(p.hostPath("OPL.ELF"), bytes.Repeat([]byte{'O'}, 300), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := p.open("OPL.ELF", fioRdonly)
+	if h <= 0 {
+		t.Fatalf("OPEN for reading: %d", h)
+	}
+	p.read(h, 8)
+	p.reboot()
+
+	if r := p.pathOp(udpfs.MsgRemoveReq, "OPL.ELF"); r != 0 {
+		t.Fatalf("REMOVE: %d", r)
+	}
+	if _, err := os.Stat(p.hostPath("OPL.ELF")); !os.IsNotExist(err) {
+		t.Fatalf("file after REMOVE: %v", err)
+	}
+	if res, st := p.getstat("OPL.ELF"); res != -udpfs.ENOENT {
+		t.Errorf("GETSTAT after REMOVE: result %d, size %d; want %d", res, st.Size, -udpfs.ENOENT)
+	}
+	if h2 := p.open("OPL.ELF", fioRdonly); h2 != -udpfs.ENOENT {
+		t.Errorf("OPEN for reading after REMOVE: %d, want %d", h2, -udpfs.ENOENT)
+	}
+}
+
 // GETSTAT answers for any path, with the same fields as for an open file
 func TestGetstatClosedFile(t *testing.T) {
 	p := newPeer(t)

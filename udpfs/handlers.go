@@ -349,6 +349,12 @@ func (c *Connection) handleRemove(addr *net.UDPAddr, payload []byte) int {
 	}
 	path := string(payload[4 : 4+pathEnd])
 
+	// A handle a peer reset left on this path would keep the removed file visible to
+	// GETSTAT and to OPEN for reading, and on Windows makes removing it fail.
+	if n := c.closeResetHandles(path); n > 0 && c.verbose {
+		log.Printf("[%s]: closed %d file handle(s) left open for %s by peer reset", addr, n, path)
+	}
+
 	if err := c.fs.Remove(path); err != nil {
 		errCode := -errToErrno(err)
 		c.SendResultReplyOnly(addr, errCode)
