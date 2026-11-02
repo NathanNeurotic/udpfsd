@@ -28,6 +28,7 @@ type CSO struct {
 	numBlocks int
 	size      int64
 	fileSize  int64
+	modTime   time.Time
 	align     uint8
 }
 
@@ -46,6 +47,31 @@ func Open(path string) (*CSO, error) {
 }
 
 func (c *CSO) parseHeader() error {
+	if err := c.checkHeader(); err != nil {
+		return err
+	}
+
+	// Seek to the start of the block map and initialize offset map
+	_, err := c.f.Seek(24, io.SeekStart)
+	if err != nil {
+		return err
+	}
+	offsetBytes := make([]byte, (c.numBlocks+1)*4)
+	if _, err := io.ReadFull(c.f, offsetBytes); err != nil {
+		return err
+	}
+	c.offsets = make([]uint32, c.numBlocks+1)
+	for i := 0; i <= c.numBlocks; i++ {
+		c.offsets[i] = binary.LittleEndian.Uint32(offsetBytes[i*4 : (i+1)*4])
+	}
+
+	c.stat = common.NewCompressedInfo(filepath.Base(c.f.Name()), int64(c.size), c.modTime)
+	return nil
+}
+
+// checkHeader reads the header and checks that the image it describes fits into the file.
+// It doesn't read the block map.
+func (c *CSO) checkHeader() error {
 	_, err := c.f.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
@@ -83,22 +109,7 @@ func (c *CSO) parseHeader() error {
 		return fmt.Errorf("invalid CSO: block map for %d blocks does not fit into the file", numBlocks)
 	}
 	c.numBlocks = int(numBlocks)
-
-	// Seek to the start of the block map and initialize offset map
-	_, err = c.f.Seek(24, io.SeekStart)
-	if err != nil {
-		return err
-	}
-	offsetBytes := make([]byte, (c.numBlocks+1)*4)
-	if _, err := io.ReadFull(c.f, offsetBytes); err != nil {
-		return err
-	}
-	c.offsets = make([]uint32, c.numBlocks+1)
-	for i := 0; i <= c.numBlocks; i++ {
-		c.offsets[i] = binary.LittleEndian.Uint32(offsetBytes[i*4 : (i+1)*4])
-	}
-
-	c.stat = common.NewCompressedInfo(filepath.Base(c.f.Name()), int64(c.size), fstat.ModTime())
+	c.modTime = fstat.ModTime()
 	return nil
 }
 
@@ -207,19 +218,10 @@ func GetStat(path string) *common.CompressedInfo {
 	}
 	defer f.Close()
 
-	b := make([]byte, 16)
-	if _, err := io.ReadFull(f, b); err != nil {
+	// Report only images that Open accepts
+	c := &CSO{f: f}
+	if c.checkHeader() != nil {
 		return nil
 	}
-	// Validate CISO header
-	if !bytes.Equal(b[0:4], csoMagic) {
-		return nil
-	}
-	size := int64(binary.LittleEndian.Uint64(b[8:16]))
-
-	var modTime time.Time
-	if fstat, err := f.Stat(); err == nil {
-		modTime = fstat.ModTime()
-	}
-	return common.NewCompressedInfo(filepath.Base(path), int64(size), modTime)
+	return common.NewCompressedInfo(filepath.Base(path), c.size, c.modTime)
 }

@@ -22,15 +22,17 @@ var (
 
 // ZSO implements BlockReader for ZSO/ZISO (LZ4 block-based) format.
 type ZSO struct {
-	f         *os.File
-	stat      *common.CompressedInfo
-	offsets   []uint32
-	blockSize int
-	numBlocks int
-	size      int64
-	fileSize  int64
-	align     uint8
-	ziso      bool
+	f          *os.File
+	stat       *common.CompressedInfo
+	offsets    []uint32
+	blockSize  int
+	numBlocks  int
+	size       int64
+	fileSize   int64
+	headerSize int64
+	modTime    time.Time
+	align      uint8
+	ziso       bool
 }
 
 // Open opens a ZSO or ZISO file and parses its header.
@@ -48,6 +50,34 @@ func Open(path string) (*ZSO, error) {
 }
 
 func (z *ZSO) parseHeader() error {
+	if err := z.checkHeader(); err != nil {
+		return err
+	}
+
+	numOffsetEntries := z.numBlocks + 1
+	if !z.ziso {
+		numOffsetEntries = z.numBlocks
+	}
+	_, err := z.f.Seek(z.headerSize, io.SeekStart)
+	if err != nil {
+		return err
+	}
+	offsetBytes := make([]byte, numOffsetEntries*4)
+	if _, err := io.ReadFull(z.f, offsetBytes); err != nil {
+		return err
+	}
+	z.offsets = make([]uint32, numOffsetEntries)
+	for i := 0; i < numOffsetEntries; i++ {
+		z.offsets[i] = binary.LittleEndian.Uint32(offsetBytes[i*4 : (i+1)*4])
+	}
+
+	z.stat = common.NewCompressedInfo(filepath.Base(z.f.Name()), int64(z.size), z.modTime)
+	return nil
+}
+
+// checkHeader reads the header and checks that the image it describes fits into the file.
+// It doesn't read the block map.
+func (z *ZSO) checkHeader() error {
 	_, err := z.f.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
@@ -64,7 +94,7 @@ func (z *ZSO) parseHeader() error {
 		return fmt.Errorf("invalid ZSO magic: %q", magic)
 	}
 
-	headerSize := binary.LittleEndian.Uint32(b[4:8])
+	z.headerSize = int64(binary.LittleEndian.Uint32(b[4:8]))
 	z.size = int64(binary.LittleEndian.Uint64(b[8:16]))
 	z.blockSize = int(binary.LittleEndian.Uint32(b[16:20]))
 	if z.ziso {
@@ -92,28 +122,11 @@ func (z *ZSO) parseHeader() error {
 	if z.ziso {
 		endEntries = 1
 	}
-	if numBlocks > (z.fileSize-int64(headerSize))/4-endEntries {
+	if numBlocks > (z.fileSize-z.headerSize)/4-endEntries {
 		return fmt.Errorf("invalid ZSO: block map for %d blocks does not fit into the file", numBlocks)
 	}
 	z.numBlocks = int(numBlocks)
-	numOffsetEntries := z.numBlocks + 1
-	if !z.ziso {
-		numOffsetEntries = z.numBlocks
-	}
-	_, err = z.f.Seek(int64(headerSize), io.SeekStart)
-	if err != nil {
-		return err
-	}
-	offsetBytes := make([]byte, numOffsetEntries*4)
-	if _, err := io.ReadFull(z.f, offsetBytes); err != nil {
-		return err
-	}
-	z.offsets = make([]uint32, numOffsetEntries)
-	for i := 0; i < numOffsetEntries; i++ {
-		z.offsets[i] = binary.LittleEndian.Uint32(offsetBytes[i*4 : (i+1)*4])
-	}
-
-	z.stat = common.NewCompressedInfo(filepath.Base(z.f.Name()), int64(z.size), fstat.ModTime())
+	z.modTime = fstat.ModTime()
 	return nil
 }
 
@@ -196,20 +209,10 @@ func GetStat(path string) *common.CompressedInfo {
 	}
 	defer f.Close()
 
-	b := make([]byte, 16)
-	if _, err := io.ReadFull(f, b); err != nil {
+	// Report only images that Open accepts
+	z := &ZSO{f: f}
+	if z.checkHeader() != nil {
 		return nil
 	}
-	magic := b[0:4]
-	if !bytes.Equal(magic, zisoMagic) && !bytes.Equal(magic, zsoMagic) {
-		return nil
-	}
-
-	size := int64(binary.LittleEndian.Uint64(b[8:16]))
-
-	var modTime time.Time
-	if fstat, err := f.Stat(); err == nil {
-		modTime = fstat.ModTime()
-	}
-	return common.NewCompressedInfo(filepath.Base(path), int64(size), modTime)
+	return common.NewCompressedInfo(filepath.Base(path), z.size, z.modTime)
 }

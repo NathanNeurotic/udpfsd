@@ -899,6 +899,38 @@ func TestCorruptCompressedImage(t *testing.T) {
 	}
 }
 
+// A compressed image with a header OPEN rejects is listed as the file it is,
+// and GETSTAT doesn't report it as an ISO image either
+func TestCorruptCompressedImageListing(t *testing.T) {
+	p := newPeer(t, fs.WithCompression())
+	images := []struct {
+		name string
+		data []byte
+	}{
+		{"huge.zso", compressedImage("ZISO", 1<<62, 1, []uint32{0}, 0)},
+		{"negative.cso", compressedImage("CISO", 1<<63, 2048, nil, 0)},
+		{"zero.zso", compressedImage("ZISO", 4096, 0, []uint32{0, 0, 0}, 0)}, // block size 0
+	}
+	var want []dirEntry
+	for _, img := range images {
+		if err := os.WriteFile(p.hostPath(img.name), img.data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, dirEntry{img.name, udpfs.FIO_S_IFREG, uint32(len(img.data))})
+	}
+	if got := p.list(""); !slices.Equal(got, want) {
+		t.Errorf("listing: %+v, want %+v", got, want)
+	}
+	for _, img := range images {
+		if res, st := p.getstat(img.name + ".iso"); res != -udpfs.ENOENT {
+			t.Errorf("GETSTAT %s.iso: result %d, size %d (high %d); want %d", img.name, res, st.Size, st.Hisize, -udpfs.ENOENT)
+		}
+		if h := p.open(img.name+".iso", fioRdonly); h != -udpfs.ENOENT {
+			t.Errorf("OPEN %s.iso: %d, want %d", img.name, h, -udpfs.ENOENT)
+		}
+	}
+}
+
 // REMOVE and RMDIR never remove the served directory itself, even when it is empty
 func TestRemoveRoot(t *testing.T) {
 	p := newPeer(t)
