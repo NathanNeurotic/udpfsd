@@ -3,6 +3,7 @@ package udpfs_test
 import (
 	"bytes"
 	"compress/flate"
+	"compress/zlib"
 	"encoding/binary"
 	"net"
 	"os"
@@ -856,7 +857,12 @@ func compressedImage(magic string, size uint64, blockSize uint32, blockMap []uin
 // read, and the server keeps running
 func TestCorruptCompressedImage(t *testing.T) {
 	p := newPeer(t, fs.WithCompression())
+	// Blocks of 2 KB that decompress to 64 KB
+	bomb := deflated(t, make([]byte, 64<<10))
+	zbomb := zlibCompressed(t, make([]byte, 64<<10))
 	images := map[string][]byte{
+		"bomb.cso":  append(compressedImage("CISO", 2048, 2048, []uint32{32, 32 + uint32(len(bomb))}, 0), bomb...),
+		"zbomb.cso": append(compressedImage("CISO", 2048, 2048, []uint32{32, 32 + uint32(len(zbomb))}, 0), zbomb...),
 		// Uncompressed size above 2^63
 		"negative.cso": compressedImage("CISO", 1<<63, 2048, nil, 0),
 		"negative.zso": compressedImage("ZISO", 1<<63, 2048, nil, 0),
@@ -1063,6 +1069,22 @@ func deflated(t *testing.T, data []byte) []byte {
 	if err == nil {
 		_, err = w.Write(data)
 	}
+	if err == nil {
+		err = w.Close()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// zlibCompressed compresses data with zlib, which CSO blocks are read in
+// when they are not raw deflate
+func zlibCompressed(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	w := zlib.NewWriter(&b)
+	_, err := w.Write(data)
 	if err == nil {
 		err = w.Close()
 	}

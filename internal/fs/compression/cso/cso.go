@@ -161,27 +161,8 @@ func (c *CSO) ReadBlock(blockIdx int) ([]byte, error) {
 
 func decompressDeflate(compressed []byte, blockSize int) ([]byte, error) {
 	dec := flate.NewReader(bytes.NewReader(compressed))
-	out := make([]byte, 0, blockSize)
-	buf := make([]byte, 4096)
-	for {
-		n, err := dec.Read(buf)
-		if n > 0 {
-			out = append(out, buf[:n]...)
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			dec.Close()
-			return nil, err
-		}
-	}
-	dec.Close()
-	if len(out) < blockSize {
-		pad := make([]byte, blockSize-len(out))
-		out = append(out, pad...)
-	}
-	return out, nil
+	defer dec.Close()
+	return readBlock(dec, blockSize)
 }
 
 func decompressZlib(compressed []byte, blockSize int) ([]byte, error) {
@@ -190,15 +171,29 @@ func decompressZlib(compressed []byte, blockSize int) ([]byte, error) {
 		return nil, err
 	}
 	defer r.Close()
-	out, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
+	return readBlock(r, blockSize)
+}
+
+// readBlock reads a decompressed block and pads it with zeros to blockSize bytes.
+// A block holds no more than blockSize bytes, so reading stops one byte later:
+// a few bytes of a corrupt block can decompress to gigabytes.
+func readBlock(r io.Reader, blockSize int) ([]byte, error) {
+	out := make([]byte, blockSize+1)
+	n := 0
+	for n < len(out) {
+		m, err := r.Read(out[n:])
+		n += m
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
-	if len(out) < blockSize {
-		pad := make([]byte, blockSize-len(out))
-		out = append(out, pad...)
+	if n > blockSize {
+		return nil, fmt.Errorf("invalid CSO: block decompresses to more than %d bytes", blockSize)
 	}
-	return out, nil
+	return out[:blockSize], nil
 }
 
 func (c *CSO) Stat() os.FileInfo {
