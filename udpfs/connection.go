@@ -125,6 +125,25 @@ func (c *Connection) lookupHandle(path string, flag int) (int32, bool) {
 	return 0, false
 }
 
+// Closes file handles left open for path by a peer reset and removes them from cache.
+// Returns the number of closed handles.
+func (c *Connection) closeResetHandles(path string) int {
+	c.Lock()
+	defer c.Unlock()
+	closed := 0
+	for fsHandle, h := range c.usedHandles {
+		if h.reset && !h.isDir && h.path == path {
+			c.fs.Close(fsHandle)
+			delete(c.usedHandles, fsHandle)
+			if c.activeWriteHandle == fsHandle {
+				c.activeWriteHandle = -1
+			}
+			closed++
+		}
+	}
+	return closed
+}
+
 // Adds handle to peer handle cache
 func (c *Connection) addHandle(handle int32, path string, flag int, isDir bool) {
 	c.Lock()

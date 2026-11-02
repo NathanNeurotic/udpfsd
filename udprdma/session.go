@@ -33,6 +33,9 @@ type Session struct {
 	txSeqNrAcked  uint16
 	rxSeqExpected uint16
 
+	// Set by PeerDiscovered until the next DATA packet
+	peerDiscovered bool
+
 	packetBuf [1500]byte
 
 	// Retransmit state tracking
@@ -120,6 +123,15 @@ func (s *Session) ResetSession() {
 	if s.resetCallback != nil {
 		s.resetCallback()
 	}
+}
+
+// PeerDiscovered tells the session that its peer sent a DISCOVERY packet.
+// A peer discovers the server whenever it starts a new session (after an IOP reboot, say),
+// so if the next DATA packet has sequence number 0, it starts a new session.
+func (s *Session) PeerDiscovered() {
+	s.Lock()
+	defer s.Unlock()
+	s.peerDiscovered = true
 }
 
 // InFlight returns the number of unacknowledged packets.

@@ -43,6 +43,18 @@ func (s *Session) ProcessDataPacket(data []byte) (payload []byte, err error) {
 		return nil, nil
 	}
 
+	// Sequence number 0 alone can't tell a new session from a retransmission (if 1 is expected)
+	// or from the next packet (if 0 is expected after a wraparound), but right after a discovery
+	// it can only start a new session. Any other sequence number continues the session,
+	// which a late discovery (a retransmitted one, say) must not end.
+	if s.peerDiscovered {
+		s.peerDiscovered = false
+		if hdr.SeqNr == 0 {
+			log.Printf("[%s]: got sequence number 0 after discovery, assuming the peer was reset", s.peerAddr)
+			s.ResetSession()
+		}
+	}
+
 	// Handle out-of-sequence packets
 	if hdr.SeqNr != s.rxSeqExpected {
 		prevSeq := (s.rxSeqExpected - 1) & 0xFFF

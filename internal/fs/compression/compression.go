@@ -28,7 +28,6 @@ type BlockReader interface {
 func Open(path string, cacheSize int) interfaces.FileObject {
 	var br BlockReader
 	var err error
-	info := &common.CompressedInfo{}
 	ext := strings.ToLower(filepath.Ext(path))
 	switch {
 	case slices.Contains(zso.Extensions, ext):
@@ -58,7 +57,8 @@ func Open(path string, cacheSize int) interfaces.FileObject {
 		cacheSize = 32
 	}
 
-	return NewCachedReader(br, cacheSize, info)
+	// The reader's Stat has the uncompressed size and the time of the image file
+	return NewCachedReader(br, cacheSize, br.Stat())
 }
 
 // Returns a slice of supported compression formats

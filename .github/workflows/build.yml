@@ -3,9 +3,11 @@ name: Build and Release
 on:
   push:
     branches:
-      - "*"
+      # "**" also matches branch names containing "/", which "*" skips
+      - "**"
     tags:
       - "v*"
+  pull_request:
   workflow_dispatch:
 
 # Avoid running again when we push the nightly tag
@@ -17,8 +19,9 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     if: github.ref != 'refs/tags/nightly'
+    # Builds and uploads artifacts only; the release jobs have their own write permission
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,6 +70,30 @@ jobs:
         with:
           name: release-archives
           path: "*.zip"
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    if: github.ref != 'refs/tags/nightly'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      # 32-bit builds are released too, and some sizes overflow only there
+      - name: Test (32-bit)
+        run: GOARCH=386 go test ./...
 
   release-tag:
     name: Release (tagged)

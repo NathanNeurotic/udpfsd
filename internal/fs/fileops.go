@@ -17,6 +17,10 @@ func (s *Backend) Open(path string, flag int, isDir bool) (handle int32, stat ud
 	// Get full path
 	fullPath, ok := s.resolvePath(path)
 	if !ok {
+		if s.fsRoot != "" {
+			// The path leads out of the served directory
+			return 0, udpfs.StatInfo{}, os.ErrPermission
+		}
 		return 0, udpfs.StatInfo{}, os.ErrNotExist
 	}
 
@@ -126,6 +130,10 @@ func (s *Backend) Read(handle int32, size uint32, readBuffer []byte) (int32, []b
 	f.Lock()
 	defer f.Unlock()
 
+	// Every reply has to fit into readBuffer
+	if int64(size) > int64(len(readBuffer)) {
+		return 0, nil, udpfs.Errno(-udpfs.EINVAL)
+	}
 	read, err := f.Read(readBuffer[:size])
 	if err != nil && err != os.ErrClosed && err != io.EOF {
 		log.Printf("fs: failed to read file %s: %v", f.Name(), err)
@@ -185,9 +193,10 @@ func (s *Backend) CompleteWrite(handle int32) (n int32, err error) {
 	data := append([]byte(nil), f.wr.dataBuffer...)
 
 	if f.wr.blockWrite {
-		expectedSize := int(f.wr.sectorCount) * sectorSize
-		if len(data) > expectedSize {
-			data = data[:expectedSize]
+		// Write no more than the sectors the write is for. Their size in bytes
+		// can overflow an int on 32-bit builds, so compare whole sectors.
+		if len(data)/sectorSize >= int(f.wr.sectorCount) {
+			data = data[:int(f.wr.sectorCount)*sectorSize]
 		}
 		_, err := f.Seek(f.wr.sectorNumber*int64(sectorSize), 0)
 		if err != nil {
@@ -229,60 +238,80 @@ func (s *Backend) Dread(handle int32) (ok bool, name string, stat udpfs.StatInfo
 	d.Lock()
 	defer d.Unlock()
 
-	if d.index >= len(d.entries) {
-		return false, "", udpfs.StatInfo{}, nil
-	}
-	entry := d.entries[d.index]
-	d.index++
-	dirPath := d.dirPath
+	// Returning no entry ends the listing, so skip entries that can't be listed instead
+	for d.index < len(d.entries) {
+		entry := d.entries[d.index]
+		d.index++
 
-	info, err := entry.Info()
-	if err != nil {
-		return false, "", udpfs.StatInfo{}, nil
-	}
-	name = entry.Name()
-
-	var st udpfs.StatInfo
-	// If compression is enabled and file has one of supported compressed ISO extensions, append .iso
-	if s.enableCompression && slices.Contains(compression.GetSupportedExtensions(), filepath.Ext(name)) {
-		name = name + ".iso"
-		entryPath := filepath.Join(dirPath, entry.Name())
-		cst := compression.GetStat(entryPath)
-		if cst == nil {
-			return false, "", udpfs.StatInfo{}, nil
+		info, err := entry.Info()
+		if err != nil {
+			// Entry was removed after the directory was opened
+			continue
 		}
-		st = udpfs.StatInfoFromFile(cst)
-	} else {
-		st = udpfs.StatInfoFromFile(info)
+		name = entry.Name()
+		entryPath := filepath.Join(d.dirPath, name)
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Report what the symlink points to, as Open and Getstat follow symlinks
+			if st, err := os.Stat(entryPath); err == nil {
+				info = st
+			}
+		}
+
+		// If compression is enabled and file has one of supported compressed ISO extensions, append .iso
+		// Extensions are matched regardless of case, like Open does
+		if s.enableCompression && slices.Contains(compression.GetSupportedExtensions(), strings.ToLower(filepath.Ext(name))) {
+			if cst := compression.GetStat(entryPath); cst != nil {
+				return true, name + ".iso", udpfs.StatInfoFromFile(cst), nil
+			}
+			// Not a valid compressed image: list it as the plain file Open finds under this name
+		}
+		return true, name, udpfs.StatInfoFromFile(info), nil
 	}
-	return true, name, st, nil
+	return false, "", udpfs.StatInfo{}, nil
 }
 
 func (s *Backend) Getstat(path string) (stat udpfs.StatInfo, err error) {
 	if path == "" {
-		if s.bdHandle != nil {
-			totalBytes := int64(s.bdHandle.totalSectorCount) * int64(s.sectorSize)
-			st := udpfs.StatInfo{}
-			st.Size = uint32(totalBytes & 0xFFFFFFFF)
-			st.Hisize = uint32(totalBytes >> 32)
-			return st, nil
+		// Empty path requests block device info and never refers to the FS root
+		if s.bdHandle == nil {
+			return stat, os.ErrInvalid
 		}
+		totalBytes := int64(s.bdHandle.totalSectorCount) * int64(s.sectorSize)
+		st := udpfs.StatInfo{}
+		st.Size = uint32(totalBytes & 0xFFFFFFFF)
+		st.Hisize = uint32(totalBytes >> 32)
+		return st, nil
 	}
 
 	resolved, ok := s.resolvePath(path)
 	if !ok {
+		if s.fsRoot != "" {
+			// The path leads out of the served directory
+			return stat, os.ErrPermission
+		}
 		return stat, os.ErrInvalid
 	}
 
-	f := s.getFileByPath(resolved)
-	if f == nil {
-		return stat, os.ErrInvalid
-	}
-	f.Lock()
-	defer f.Unlock()
+	if f := s.getFileByPath(resolved); f != nil {
+		f.Lock()
+		defer f.Unlock()
 
-	st, err := f.Stat()
+		st, err := f.Stat()
+		if err != nil {
+			return stat, err
+		}
+		return udpfs.StatInfoFromFile(st), nil
+	}
+
+	// File is not open, stat the path
+	st, err := os.Stat(resolved)
 	if err != nil {
+		// Like Open, look for a compressed image if the .iso path doesn't exist
+		if s.enableCompression && strings.ToLower(filepath.Ext(resolved)) == ".iso" {
+			if cst := compression.GetStat(strings.TrimSuffix(resolved, filepath.Ext(resolved))); cst != nil {
+				return udpfs.StatInfoFromFile(cst), nil
+			}
+		}
 		return stat, err
 	}
 	return udpfs.StatInfoFromFile(st), nil
@@ -296,10 +325,14 @@ func (s *Backend) Mkdir(path string) error {
 	if !ok {
 		return os.ErrPermission
 	}
-	if err := os.Mkdir(resolved, 0755); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
+	err := os.Mkdir(resolved, 0755)
+	if errors.Is(err, os.ErrExist) {
+		// An existing directory is not an error, but a file in its place is
+		if st, serr := os.Stat(resolved); serr == nil && st.IsDir() {
+			return nil
+		}
 	}
-	return nil
+	return err
 }
 
 func (s *Backend) Remove(path string) error {
@@ -307,7 +340,8 @@ func (s *Backend) Remove(path string) error {
 		return os.ErrPermission
 	}
 	resolved, ok := s.resolvePath(path)
-	if !ok {
+	if !ok || resolved == filepath.Clean(s.fsRoot) {
+		// Never remove the served directory itself
 		return os.ErrPermission
 	}
 	return os.Remove(resolved)
@@ -318,8 +352,17 @@ func (s *Backend) Rmdir(path string) error {
 		return os.ErrPermission
 	}
 	resolved, ok := s.resolvePath(path)
-	if !ok {
+	if !ok || resolved == filepath.Clean(s.fsRoot) {
+		// Never remove the served directory itself
 		return os.ErrPermission
+	}
+	// os.Remove also removes files and symlinks
+	st, err := os.Lstat(resolved)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() {
+		return udpfs.Errno(-udpfs.ENOTDIR)
 	}
 	return os.Remove(resolved)
 }
@@ -336,13 +379,18 @@ func (s *Backend) Bread(handle int32, sectorNr int64, sectorCount uint16, readBu
 	if handle != udpfs.BlockDeviceHandle {
 		sectorSize = 512
 	}
+	// Every reply has to fit into readBuffer
+	size := int64(sectorCount) * int64(sectorSize)
+	if size < 0 || size > int64(len(readBuffer)) {
+		return nil, udpfs.Errno(-udpfs.EINVAL)
+	}
 
 	_, err := f.Seek(sectorNr*int64(sectorSize), io.SeekStart)
 	if err != nil {
 		return nil, err
 	}
 
-	n, err := f.Read(readBuffer[:int(sectorCount)*sectorSize])
+	n, err := f.Read(readBuffer[:size])
 	if err != nil && err != io.EOF {
 		log.Printf("fs: failed to read %s: %v", f.Name(), err)
 		return nil, err

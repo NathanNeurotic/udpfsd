@@ -27,6 +27,8 @@ type CSO struct {
 	blockSize int
 	numBlocks int
 	size      int64
+	fileSize  int64
+	modTime   time.Time
 	align     uint8
 }
 
@@ -45,6 +47,31 @@ func Open(path string) (*CSO, error) {
 }
 
 func (c *CSO) parseHeader() error {
+	if err := c.checkHeader(); err != nil {
+		return err
+	}
+
+	// Seek to the start of the block map and initialize offset map
+	_, err := c.f.Seek(24, io.SeekStart)
+	if err != nil {
+		return err
+	}
+	offsetBytes := make([]byte, (c.numBlocks+1)*4)
+	if _, err := io.ReadFull(c.f, offsetBytes); err != nil {
+		return err
+	}
+	c.offsets = make([]uint32, c.numBlocks+1)
+	for i := 0; i <= c.numBlocks; i++ {
+		c.offsets[i] = binary.LittleEndian.Uint32(offsetBytes[i*4 : (i+1)*4])
+	}
+
+	c.stat = common.NewCompressedInfo(filepath.Base(c.f.Name()), int64(c.size), c.modTime)
+	return nil
+}
+
+// checkHeader reads the header and checks that the image it describes fits into the file.
+// It doesn't read the block map.
+func (c *CSO) checkHeader() error {
 	_, err := c.f.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
@@ -60,30 +87,32 @@ func (c *CSO) parseHeader() error {
 	c.size = int64(binary.LittleEndian.Uint64(b[8:16]))
 	c.blockSize = int(binary.LittleEndian.Uint32(b[16:20]))
 	c.align = b[21]
-	if c.blockSize == 0 {
-		return fmt.Errorf("invalid CSO: block_size is 0")
+	if c.blockSize <= 0 || c.blockSize > common.MaxBlockSize {
+		return fmt.Errorf("invalid CSO: block_size is %d", c.blockSize)
 	}
-	c.numBlocks = int((c.size + int64(c.blockSize) - 1) / int64(c.blockSize))
-
-	// Seek to the start of the block map and initialize offset map
-	_, err = c.f.Seek(24, io.SeekStart)
+	if c.size < 0 {
+		return fmt.Errorf("invalid CSO: uncompressed size %d is too large", uint64(c.size))
+	}
+	fstat, err := c.f.Stat()
 	if err != nil {
 		return err
 	}
-	offsetBytes := make([]byte, (c.numBlocks+1)*4)
-	if _, err := io.ReadFull(c.f, offsetBytes); err != nil {
-		return err
+	c.fileSize = fstat.Size()
+	// The block map has an entry for every block and one for the end of the last block,
+	// so it has to fit into the file. Checking this first keeps a corrupt header from
+	// making the block map larger than memory.
+	numBlocks := c.size / int64(c.blockSize)
+	if c.size%int64(c.blockSize) != 0 {
+		numBlocks++
 	}
-	c.offsets = make([]uint32, c.numBlocks+1)
-	for i := 0; i <= c.numBlocks; i++ {
-		c.offsets[i] = binary.LittleEndian.Uint32(offsetBytes[i*4 : (i+1)*4])
+	if numBlocks > common.MaxBlocks {
+		return fmt.Errorf("invalid CSO: %d blocks is more than a disc image has", numBlocks)
 	}
-
-	var modTime time.Time
-	if fstat, err := c.f.Stat(); err == nil {
-		modTime = fstat.ModTime()
+	if numBlocks >= (c.fileSize-24)/4 {
+		return fmt.Errorf("invalid CSO: block map for %d blocks does not fit into the file", numBlocks)
 	}
-	c.stat = common.NewCompressedInfo(filepath.Base(c.f.Name()), int64(c.size), modTime)
+	c.numBlocks = int(numBlocks)
+	c.modTime = fstat.ModTime()
 	return nil
 }
 
@@ -103,6 +132,15 @@ func (c *CSO) ReadBlock(blockIdx int) ([]byte, error) {
 		// If the block is compressed, get the read size by getting the next block offset
 		readSize = int((int64(c.offsets[blockIdx+1]&0x7FFFFFFF) << c.align) - readOffset)
 	}
+	// A corrupt block map can point anywhere
+	if readOffset < 0 || readSize < 0 || int64(readSize) > c.fileSize-readOffset {
+		return nil, fmt.Errorf("invalid CSO: block %d (%d bytes at %d) is outside of the file", blockIdx, readSize, readOffset)
+	}
+	// The data of a compressed block is smaller than the block, or the block would
+	// be stored uncompressed, but a corrupt block map can make it run on for most
+	// of the file. Decompression stops at the end of the data, so read no more
+	// than twice the block size.
+	readSize = min(readSize, 2*c.blockSize)
 	// Read the block
 	_, err := c.f.Seek(readOffset, io.SeekStart)
 	if err != nil {
@@ -128,27 +166,8 @@ func (c *CSO) ReadBlock(blockIdx int) ([]byte, error) {
 
 func decompressDeflate(compressed []byte, blockSize int) ([]byte, error) {
 	dec := flate.NewReader(bytes.NewReader(compressed))
-	out := make([]byte, 0, blockSize)
-	buf := make([]byte, 4096)
-	for {
-		n, err := dec.Read(buf)
-		if n > 0 {
-			out = append(out, buf[:n]...)
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			dec.Close()
-			return nil, err
-		}
-	}
-	dec.Close()
-	if len(out) < blockSize {
-		pad := make([]byte, blockSize-len(out))
-		out = append(out, pad...)
-	}
-	return out, nil
+	defer dec.Close()
+	return readBlock(dec, blockSize)
 }
 
 func decompressZlib(compressed []byte, blockSize int) ([]byte, error) {
@@ -157,15 +176,29 @@ func decompressZlib(compressed []byte, blockSize int) ([]byte, error) {
 		return nil, err
 	}
 	defer r.Close()
-	out, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
+	return readBlock(r, blockSize)
+}
+
+// readBlock reads a decompressed block and pads it with zeros to blockSize bytes.
+// A block holds no more than blockSize bytes, so reading stops one byte later:
+// a few bytes of a corrupt block can decompress to gigabytes.
+func readBlock(r io.Reader, blockSize int) ([]byte, error) {
+	out := make([]byte, blockSize+1)
+	n := 0
+	for n < len(out) {
+		m, err := r.Read(out[n:])
+		n += m
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
-	if len(out) < blockSize {
-		pad := make([]byte, blockSize-len(out))
-		out = append(out, pad...)
+	if n > blockSize {
+		return nil, fmt.Errorf("invalid CSO: block decompresses to more than %d bytes", blockSize)
 	}
-	return out, nil
+	return out[:blockSize], nil
 }
 
 func (c *CSO) Stat() os.FileInfo {
@@ -186,20 +219,12 @@ func GetStat(path string) *common.CompressedInfo {
 	if err != nil {
 		return nil
 	}
+	defer f.Close()
 
-	b := make([]byte, 16)
-	if _, err := io.ReadFull(f, b); err != nil {
+	// Report only images that Open accepts
+	c := &CSO{f: f}
+	if c.checkHeader() != nil {
 		return nil
 	}
-	// Validate CISO header
-	if !bytes.Equal(b[0:4], csoMagic) {
-		return nil
-	}
-	size := int64(binary.LittleEndian.Uint64(b[8:16]))
-
-	var modTime time.Time
-	if fstat, err := f.Stat(); err == nil {
-		modTime = fstat.ModTime()
-	}
-	return common.NewCompressedInfo(filepath.Base(path), int64(size), modTime)
+	return common.NewCompressedInfo(filepath.Base(path), c.size, c.modTime)
 }
