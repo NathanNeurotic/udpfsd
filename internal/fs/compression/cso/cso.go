@@ -136,6 +136,11 @@ func (c *CSO) ReadBlock(blockIdx int) ([]byte, error) {
 	if readOffset < 0 || readSize < 0 || int64(readSize) > c.fileSize-readOffset {
 		return nil, fmt.Errorf("invalid CSO: block %d (%d bytes at %d) is outside of the file", blockIdx, readSize, readOffset)
 	}
+	// The data of a compressed block is smaller than the block, or the block would
+	// be stored uncompressed, but a corrupt block map can make it run on for most
+	// of the file. Decompression stops at the end of the data, so read no more
+	// than twice the block size.
+	readSize = min(readSize, 2*c.blockSize)
 	// Read the block
 	_, err := c.f.Seek(readOffset, io.SeekStart)
 	if err != nil {

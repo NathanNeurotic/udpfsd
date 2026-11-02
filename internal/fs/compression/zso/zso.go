@@ -169,6 +169,11 @@ func (z *ZSO) ReadBlock(blockIdx int) ([]byte, error) {
 	if offset < 0 || compressedSize < 0 || int64(compressedSize) > z.fileSize-offset {
 		return nil, fmt.Errorf("invalid ZSO: block %d (%d bytes at %d) is outside of the file", blockIdx, compressedSize, offset)
 	}
+	// The data of a compressed block is smaller than the block, or the block would
+	// be stored uncompressed, but a corrupt block map can make it run on for most
+	// of the file. Read no more than twice the block size: the retries below trim
+	// what follows the data one byte at a time.
+	compressedSize = min(compressedSize, 2*z.blockSize)
 	uncompressed := (rawOffset & 0x80000000) != 0
 
 	_, err := z.f.Seek(offset, io.SeekStart)
@@ -184,9 +189,10 @@ func (z *ZSO) ReadBlock(blockIdx int) ([]byte, error) {
 		copy(out, compressed)
 		return out, nil
 	}
-	// LZ4 with OPL-style retry (trim trailing byte for alignment padding)
+	// LZ4 with OPL-style retry (trim trailing byte for alignment padding).
+	// Each attempt writes out from the start.
+	out := make([]byte, z.blockSize)
 	for len(compressed) > 0 {
-		out := make([]byte, z.blockSize)
 		n, err := lz4.UncompressBlock(compressed, out)
 		if err == nil {
 			return out[:n], nil

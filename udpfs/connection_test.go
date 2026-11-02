@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/pcm720/udpfsd/internal/fs"
 	"github.com/pcm720/udpfsd/udpfs"
 	"github.com/pcm720/udpfsd/udprdma"
+	"github.com/pierrec/lz4/v4"
 )
 
 // Open flags as the PS2 sends them in OPEN_REQ
@@ -1301,5 +1303,57 @@ func TestCompressedImageLargeBlocks(t *testing.T) {
 		if got := p.read(h, 64); !bytes.Equal(got, data[:64]) {
 			t.Errorf("READ %s: %q, want %q", e.name, got, data[:64])
 		}
+	}
+}
+
+// lz4Compressed compresses data into one LZ4 block, as ZSO blocks are
+func lz4Compressed(t *testing.T, data []byte) []byte {
+	t.Helper()
+	out := make([]byte, lz4.CompressBlockBound(len(data)))
+	n, err := lz4.CompressBlock(data, out, nil)
+	if err != nil || n == 0 {
+		t.Fatalf("LZ4 block of %d bytes: %d bytes, %v", len(data), n, err)
+	}
+	return out[:n]
+}
+
+// A block whose next entry in the block map is far away, as a corrupt map can
+// make it, is read without taking memory for all of the file up to there: the
+// data of a compressed block is smaller than the block
+func TestCompressedImageBlockSpanningFile(t *testing.T) {
+	p := newPeer(t, fs.WithCompression())
+	data := make([]byte, 2048)
+	copy(data, "the first block")
+	// The block's data, then a hole up to the next entry of the block map
+	const span = 16 << 20
+	images := map[string][]byte{
+		"a.cso": append(compressedImage("CISO", 2048, 2048, []uint32{32, 32 + span}, 0), deflated(t, data)...),
+		"b.zso": append(compressedImage("ZISO", 2048, 2048, []uint32{32, 32 + span}, 0), lz4Compressed(t, data)...),
+	}
+	for name, img := range images {
+		if err := os.WriteFile(p.hostPath(name), img, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(p.hostPath(name), 32+span); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"a.cso.iso", "b.zso.iso"} {
+		h := p.open(name, fioRdonly)
+		if h <= 0 {
+			t.Fatalf("OPEN %s: %d", name, h)
+		}
+		// The READ decompresses the whole block
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		got := p.read(h, 64)
+		runtime.ReadMemStats(&after)
+		if !bytes.Equal(got, data[:64]) {
+			t.Errorf("READ %s: %q, want %q", name, got, data[:64])
+		}
+		if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 4<<20 {
+			t.Errorf("READ %s of a %d-byte block allocated %d MiB", name, len(data), alloc>>20)
+		}
+		p.close(h)
 	}
 }
