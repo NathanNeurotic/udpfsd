@@ -777,6 +777,68 @@ func TestListingSymlinks(t *testing.T) {
 	}
 }
 
+// compressedImage returns a CSO or ZISO header, the block map and data
+func compressedImage(magic string, size uint64, blockSize uint32, blockMap []uint32, data int) []byte {
+	b := make([]byte, 24)
+	copy(b, magic)
+	binary.LittleEndian.PutUint32(b[4:], 24) // header size
+	binary.LittleEndian.PutUint64(b[8:], size)
+	binary.LittleEndian.PutUint32(b[16:], blockSize)
+	b[20] = 1 // version
+	for _, offset := range blockMap {
+		b = binary.LittleEndian.AppendUint32(b, offset)
+	}
+	return append(b, make([]byte, data)...)
+}
+
+// A compressed image with a corrupt header or block map can't be opened or
+// read, and the server keeps running
+func TestCorruptCompressedImage(t *testing.T) {
+	p := newPeer(t, fs.WithCompression())
+	images := map[string][]byte{
+		// Uncompressed size above 2^63
+		"negative.cso": compressedImage("CISO", 1<<63, 2048, nil, 0),
+		"negative.zso": compressedImage("ZISO", 1<<63, 2048, nil, 0),
+		// 2^62 blocks, which need a block map far larger than the file
+		"huge.cso": compressedImage("CISO", 1<<62, 1, []uint32{0}, 0),
+		"huge.zso": compressedImage("ZISO", 1<<62, 1, []uint32{0}, 0),
+		// Two blocks, the second one before the first one
+		"reversed.cso": compressedImage("CISO", 4096, 2048, []uint32{200, 100, 300}, 300),
+		"reversed.zso": compressedImage("ZISO", 4096, 2048, []uint32{200, 100, 300}, 300),
+	}
+	for name, data := range images {
+		if err := os.WriteFile(p.hostPath(name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name := range images {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: server panicked: %v", name, r)
+				}
+			}()
+			h := p.open(name+".iso", fioRdonly)
+			if h <= 0 {
+				return // can't be opened
+			}
+			req := make([]byte, 12)
+			req[0] = byte(udpfs.MsgReadReq)
+			binary.LittleEndian.PutUint32(req[4:], uint32(h))
+			binary.LittleEndian.PutUint32(req[8:], 4096)
+			if res := result(p.request(req, udpfs.MsgResultReply)); res >= 0 {
+				t.Errorf("%s: OPEN succeeded and READ returned %d, want an error", name, res)
+			}
+			p.close(h)
+		}()
+	}
+
+	p.copyTestImage("test.cso", "game.cso")
+	if h := p.open("game.cso.iso", fioRdonly); h <= 0 {
+		t.Fatalf("OPEN of a valid image afterwards: %d", h)
+	}
+}
+
 // REMOVE and RMDIR never remove the served directory itself, even when it is empty
 func TestRemoveRoot(t *testing.T) {
 	p := newPeer(t)

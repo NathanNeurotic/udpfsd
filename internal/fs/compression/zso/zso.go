@@ -28,6 +28,7 @@ type ZSO struct {
 	blockSize int
 	numBlocks int
 	size      int64
+	fileSize  int64
 	align     uint8
 	ziso      bool
 }
@@ -69,10 +70,32 @@ func (z *ZSO) parseHeader() error {
 	if z.ziso {
 		z.align = b[21]
 	}
-	if z.blockSize == 0 {
-		return fmt.Errorf("invalid ZSO: block_size is 0")
+	if z.blockSize <= 0 {
+		return fmt.Errorf("invalid ZSO: block_size is %d", z.blockSize)
 	}
-	z.numBlocks = int((z.size + int64(z.blockSize) - 1) / int64(z.blockSize))
+	if z.size < 0 {
+		return fmt.Errorf("invalid ZSO: uncompressed size %d is too large", uint64(z.size))
+	}
+	fstat, err := z.f.Stat()
+	if err != nil {
+		return err
+	}
+	z.fileSize = fstat.Size()
+	// The block map has an entry for every block, and ZISO one more for the end of the last block,
+	// so it has to fit into the file. Checking this first keeps a corrupt header from
+	// making the block map larger than memory.
+	numBlocks := z.size / int64(z.blockSize)
+	if z.size%int64(z.blockSize) != 0 {
+		numBlocks++
+	}
+	endEntries := int64(0)
+	if z.ziso {
+		endEntries = 1
+	}
+	if numBlocks > (z.fileSize-int64(headerSize))/4-endEntries {
+		return fmt.Errorf("invalid ZSO: block map for %d blocks does not fit into the file", numBlocks)
+	}
+	z.numBlocks = int(numBlocks)
 	numOffsetEntries := z.numBlocks + 1
 	if !z.ziso {
 		numOffsetEntries = z.numBlocks
@@ -90,11 +113,7 @@ func (z *ZSO) parseHeader() error {
 		z.offsets[i] = binary.LittleEndian.Uint32(offsetBytes[i*4 : (i+1)*4])
 	}
 
-	var modTime time.Time
-	if fstat, err := z.f.Stat(); err == nil {
-		modTime = fstat.ModTime()
-	}
-	z.stat = common.NewCompressedInfo(filepath.Base(z.f.Name()), int64(z.size), modTime)
+	z.stat = common.NewCompressedInfo(filepath.Base(z.f.Name()), int64(z.size), fstat.ModTime())
 	return nil
 }
 
@@ -129,6 +148,10 @@ func (z *ZSO) ReadBlock(blockIdx int) ([]byte, error) {
 			compressedSize = int(info.Size() - int64(rawOffset))
 		}
 		offset = int64(rawOffset)
+	}
+	// A corrupt block map can point anywhere
+	if offset < 0 || compressedSize < 0 || int64(compressedSize) > z.fileSize-offset {
+		return nil, fmt.Errorf("invalid ZSO: block %d (%d bytes at %d) is outside of the file", blockIdx, compressedSize, offset)
 	}
 	uncompressed := (rawOffset & 0x80000000) != 0
 

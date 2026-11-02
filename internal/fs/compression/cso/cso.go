@@ -27,6 +27,7 @@ type CSO struct {
 	blockSize int
 	numBlocks int
 	size      int64
+	fileSize  int64
 	align     uint8
 }
 
@@ -60,10 +61,28 @@ func (c *CSO) parseHeader() error {
 	c.size = int64(binary.LittleEndian.Uint64(b[8:16]))
 	c.blockSize = int(binary.LittleEndian.Uint32(b[16:20]))
 	c.align = b[21]
-	if c.blockSize == 0 {
-		return fmt.Errorf("invalid CSO: block_size is 0")
+	if c.blockSize <= 0 {
+		return fmt.Errorf("invalid CSO: block_size is %d", c.blockSize)
 	}
-	c.numBlocks = int((c.size + int64(c.blockSize) - 1) / int64(c.blockSize))
+	if c.size < 0 {
+		return fmt.Errorf("invalid CSO: uncompressed size %d is too large", uint64(c.size))
+	}
+	fstat, err := c.f.Stat()
+	if err != nil {
+		return err
+	}
+	c.fileSize = fstat.Size()
+	// The block map has an entry for every block and one for the end of the last block,
+	// so it has to fit into the file. Checking this first keeps a corrupt header from
+	// making the block map larger than memory.
+	numBlocks := c.size / int64(c.blockSize)
+	if c.size%int64(c.blockSize) != 0 {
+		numBlocks++
+	}
+	if numBlocks >= (c.fileSize-24)/4 {
+		return fmt.Errorf("invalid CSO: block map for %d blocks does not fit into the file", numBlocks)
+	}
+	c.numBlocks = int(numBlocks)
 
 	// Seek to the start of the block map and initialize offset map
 	_, err = c.f.Seek(24, io.SeekStart)
@@ -79,11 +98,7 @@ func (c *CSO) parseHeader() error {
 		c.offsets[i] = binary.LittleEndian.Uint32(offsetBytes[i*4 : (i+1)*4])
 	}
 
-	var modTime time.Time
-	if fstat, err := c.f.Stat(); err == nil {
-		modTime = fstat.ModTime()
-	}
-	c.stat = common.NewCompressedInfo(filepath.Base(c.f.Name()), int64(c.size), modTime)
+	c.stat = common.NewCompressedInfo(filepath.Base(c.f.Name()), int64(c.size), fstat.ModTime())
 	return nil
 }
 
@@ -102,6 +117,10 @@ func (c *CSO) ReadBlock(blockIdx int) ([]byte, error) {
 	if !isPlain {
 		// If the block is compressed, get the read size by getting the next block offset
 		readSize = int((int64(c.offsets[blockIdx+1]&0x7FFFFFFF) << c.align) - readOffset)
+	}
+	// A corrupt block map can point anywhere
+	if readOffset < 0 || readSize < 0 || int64(readSize) > c.fileSize-readOffset {
+		return nil, fmt.Errorf("invalid CSO: block %d (%d bytes at %d) is outside of the file", blockIdx, readSize, readOffset)
 	}
 	// Read the block
 	_, err := c.f.Seek(readOffset, io.SeekStart)
