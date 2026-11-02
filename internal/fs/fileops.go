@@ -260,13 +260,15 @@ func (s *Backend) Dread(handle int32) (ok bool, name string, stat udpfs.StatInfo
 
 func (s *Backend) Getstat(path string) (stat udpfs.StatInfo, err error) {
 	if path == "" {
-		if s.bdHandle != nil {
-			totalBytes := int64(s.bdHandle.totalSectorCount) * int64(s.sectorSize)
-			st := udpfs.StatInfo{}
-			st.Size = uint32(totalBytes & 0xFFFFFFFF)
-			st.Hisize = uint32(totalBytes >> 32)
-			return st, nil
+		// Empty path requests block device info and never refers to the FS root
+		if s.bdHandle == nil {
+			return stat, os.ErrInvalid
 		}
+		totalBytes := int64(s.bdHandle.totalSectorCount) * int64(s.sectorSize)
+		st := udpfs.StatInfo{}
+		st.Size = uint32(totalBytes & 0xFFFFFFFF)
+		st.Hisize = uint32(totalBytes >> 32)
+		return st, nil
 	}
 
 	resolved, ok := s.resolvePath(path)
@@ -274,15 +276,26 @@ func (s *Backend) Getstat(path string) (stat udpfs.StatInfo, err error) {
 		return stat, os.ErrInvalid
 	}
 
-	f := s.getFileByPath(resolved)
-	if f == nil {
-		return stat, os.ErrInvalid
-	}
-	f.Lock()
-	defer f.Unlock()
+	if f := s.getFileByPath(resolved); f != nil {
+		f.Lock()
+		defer f.Unlock()
 
-	st, err := f.Stat()
+		st, err := f.Stat()
+		if err != nil {
+			return stat, err
+		}
+		return udpfs.StatInfoFromFile(st), nil
+	}
+
+	// File is not open, stat the path
+	st, err := os.Stat(resolved)
 	if err != nil {
+		// Like Open, look for a compressed image if the .iso path doesn't exist
+		if s.enableCompression && strings.ToLower(filepath.Ext(resolved)) == ".iso" {
+			if cst := compression.GetStat(strings.TrimSuffix(resolved, filepath.Ext(resolved))); cst != nil {
+				return udpfs.StatInfoFromFile(cst), nil
+			}
+		}
 		return stat, err
 	}
 	return udpfs.StatInfoFromFile(st), nil

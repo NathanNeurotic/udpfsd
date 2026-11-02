@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pcm720/udpfsd/internal/fs"
 	"github.com/pcm720/udpfsd/udpfs"
@@ -38,14 +39,17 @@ type peer struct {
 	replies [][]byte
 }
 
-func newPeer(t *testing.T) *peer {
+func newPeer(t *testing.T, opts ...fs.BackendOptFunc) *peer {
 	t.Helper()
 	p := &peer{
 		t:    t,
-		root: t.TempDir(),
+		root: filepath.Join(t.TempDir(), "root"), // the parent is free for files outside the root
 		addr: &net.UDPAddr{IP: net.IPv4(192, 168, 0, 10), Port: udprdma.UDPFSPort},
 	}
-	backend, err := fs.NewBackend(fs.WithFSRoot(p.root))
+	if err := os.Mkdir(p.root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := fs.NewBackend(append([]fs.BackendOptFunc{fs.WithFSRoot(p.root)}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +162,21 @@ func (p *peer) read(handle int32, size uint32) []byte {
 		p.t.Fatalf("READ handle %d: %d", handle, n)
 	}
 	return reply[8 : 8+n]
+}
+
+// getstat sends GETSTAT and returns the result and the stat fields of the reply
+func (p *peer) getstat(path string) (int32, udpfs.StatInfo) {
+	p.t.Helper()
+	reply := p.request(withPath([]byte{byte(udpfs.MsgGetstatReq), 0, 0, 0}, path), udpfs.MsgGetstatReply)
+	var st udpfs.StatInfo
+	st.Mode = binary.LittleEndian.Uint32(reply[8:])
+	st.Attr = binary.LittleEndian.Uint32(reply[12:])
+	st.Size = binary.LittleEndian.Uint32(reply[16:])
+	st.Hisize = binary.LittleEndian.Uint32(reply[20:])
+	copy(st.Ctime[:], reply[24:])
+	copy(st.Atime[:], reply[32:])
+	copy(st.Mtime[:], reply[40:])
+	return result(reply), st
 }
 
 // pathOp sends MKDIR, REMOVE or RMDIR and returns the result
@@ -301,5 +320,99 @@ func TestReopenForReadingAfterResetReusesHandle(t *testing.T) {
 	}
 	if got := p.read(h, uint32(len(data))); !bytes.Equal(got, data) {
 		t.Fatalf("READ after reset returned %q, want %q", got, data)
+	}
+}
+
+// GETSTAT answers for any path, with the same fields as for an open file
+func TestGetstatClosedFile(t *testing.T) {
+	p := newPeer(t)
+	path := p.hostPath("APPS/OPL.ELF")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, 5000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mtime := time.Date(2024, time.March, 5, 6, 7, 8, 0, time.Local)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	ps2Time := [8]byte{0, 8, 7, 6, 5, 3, 0xE8, 0x07} // 2024-03-05 06:07:08
+	want := udpfs.StatInfo{Mode: udpfs.FIO_S_IFREG, Size: 5000, Ctime: ps2Time, Atime: ps2Time, Mtime: ps2Time}
+
+	if res, st := p.getstat("APPS/OPL.ELF"); res != 0 || st != want {
+		t.Fatalf("GETSTAT of a closed file: result %d, %+v; want 0, %+v", res, st, want)
+	}
+	if h := p.open("APPS/OPL.ELF", fioRdonly); h <= 0 {
+		t.Fatalf("OPEN: %d", h)
+	}
+	if res, st := p.getstat("APPS/OPL.ELF"); res != 0 || st != want {
+		t.Fatalf("GETSTAT of an open file: result %d, %+v; want 0, %+v", res, st, want)
+	}
+}
+
+func TestGetstatDirectory(t *testing.T) {
+	p := newPeer(t)
+	if err := os.Mkdir(p.hostPath("APPS"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if res, st := p.getstat("APPS"); res != 0 || st.Mode != udpfs.FIO_S_IFDIR {
+		t.Fatalf("GETSTAT of a directory: result %d, mode 0x%x; want 0, mode 0x%x", res, st.Mode, udpfs.FIO_S_IFDIR)
+	}
+}
+
+func TestGetstatMissingPath(t *testing.T) {
+	p := newPeer(t)
+	if res, st := p.getstat("APPS/MISSING.ELF"); res != -udpfs.ENOENT || st != (udpfs.StatInfo{}) {
+		t.Fatalf("GETSTAT of a missing file: result %d, %+v; want %d", res, st, -udpfs.ENOENT)
+	}
+}
+
+// GETSTAT reports nothing about files outside the served directory
+func TestGetstatOutsideRoot(t *testing.T) {
+	p := newPeer(t)
+	if err := os.WriteFile(filepath.Join(p.root, "..", "outside.elf"), make([]byte, 5000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"../outside.elf", "APPS/../../outside.elf"} {
+		if res, st := p.getstat(path); res >= 0 || st != (udpfs.StatInfo{}) {
+			t.Errorf("GETSTAT %s: result %d, %+v; want an error", path, res, st)
+		}
+	}
+}
+
+// A compressed image is listed and opened as <name>.iso, so GETSTAT finds it the same way
+func TestGetstatCompressedImage(t *testing.T) {
+	p := newPeer(t, fs.WithCompression())
+	cso, err := os.ReadFile("../internal/fs/compression/test/test.cso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	iso, err := os.Stat("../internal/fs/compression/test/test.iso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.hostPath("game.cso"), cso, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res, st := p.getstat("game.cso.iso"); res != 0 || st.Mode != udpfs.FIO_S_IFREG || st.Size != uint32(iso.Size()) || st.Hisize != 0 {
+		t.Fatalf("GETSTAT of a compressed image: result %d, %+v; want 0, a regular file of %d bytes", res, st, iso.Size())
+	}
+}
+
+// An empty path asks for the block device, never for the served directory
+func TestGetstatEmptyPath(t *testing.T) {
+	p := newPeer(t)
+	if res, st := p.getstat(""); res >= 0 {
+		t.Errorf("GETSTAT of an empty path without a block device: result %d, %+v; want an error", res, st)
+	}
+
+	disk := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(disk, make([]byte, 64*512), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p = newPeer(t, fs.WithBlockDevice(disk))
+	if res, st := p.getstat(""); res != 0 || st.Size != 64*512 || st.Hisize != 0 {
+		t.Errorf("GETSTAT of an empty path with a block device: result %d, %+v; want 0, size %d", res, st, 64*512)
 	}
 }
