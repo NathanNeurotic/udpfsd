@@ -1050,6 +1050,12 @@ func TestCorruptCompressedImage(t *testing.T) {
 		"reversed.cso": compressedImage("CISO", 4096, 2048, []uint32{200, 100, 300}, 300),
 		"reversed.zso": compressedImage("ZISO", 4096, 2048, []uint32{200, 100, 300}, 300),
 	}
+	// One block that ends about 2^51 bytes into the file, as offsets are in units of 2^20
+	// bytes: more than a slice can hold
+	for name, magic := range map[string]string{"far.cso": "CISO", "far.zso": "ZISO"} {
+		images[name] = compressedImage(magic, 2048, 2048, []uint32{0, 0x7FFFFFFF}, 16)
+		images[name][21] = 20 // align
+	}
 	for name, data := range images {
 		if err := os.WriteFile(p.hostPath(name), data, 0o644); err != nil {
 			t.Fatal(err)
@@ -1096,6 +1102,9 @@ func TestCorruptCompressedImageListing(t *testing.T) {
 		{"big.zso", compressedImage("ZISO", 2048, 0x7FFFFFFF, []uint32{32 | 0x80000000, 48}, 16)},
 		{"huge.zso", compressedImage("ZISO", 1<<62, 1, []uint32{0}, 0)},
 		{"negative.cso", compressedImage("CISO", 1<<63, 2048, nil, 0)},
+		// Two blocks, and the file ends before the entry for the end of the second one
+		{"short.cso", compressedImage("CISO", 4096, 2048, []uint32{32, 36}, 0)},
+		{"short.zso", compressedImage("ZISO", 4096, 2048, []uint32{32, 36}, 0)},
 		{"truncated.cso", compressedImage("CISO", 1<<20, 1, []uint32{0}, 0)}, // block map longer than the file
 		{"truncated.zso", compressedImage("ZISO", 1<<20, 1, []uint32{0}, 0)},
 		{"zero.zso", compressedImage("ZISO", 4096, 0, []uint32{0, 0, 0}, 0)}, // block size 0
