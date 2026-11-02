@@ -674,6 +674,37 @@ func TestInvalidHandleOrSize(t *testing.T) {
 	}()
 }
 
+// BWRITE of 65535 sectors, whose size in bytes doesn't fit into an int with
+// sectors of 64 KB on 32-bit builds, writes the data it got
+func TestBwriteSizeOverflow(t *testing.T) {
+	disk := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(disk, make([]byte, 64*512), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The smallest sector size for which 65535 sectors overflow an int:
+	// 64 KB on 32-bit builds, 256 TB on 64-bit ones
+	p := newPeer(t, fs.WithBlockDevice(disk), fs.WithSectorSize(1<<(strconv.IntSize-16)))
+	req := make([]byte, 16)
+	req[0] = byte(udpfs.MsgBwriteReq)
+	binary.LittleEndian.PutUint16(req[2:], 0xFFFF) // sector_count
+	binary.LittleEndian.PutUint32(req[4:], uint32(udpfs.BlockDeviceHandle))
+	// WRITE_DATA header of a single 4-byte chunk, and the chunk
+	req = append(req, byte(udpfs.MsgWriteData), 0, 0, 0, 4, 0, 1, 0, 'D', 'A', 'T', 'A')
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("BWRITE of 65535 sectors: server panicked: %v", r)
+			}
+		}()
+		if res := result(p.request(req, udpfs.MsgWriteDone)); res != 0 {
+			t.Errorf("BWRITE of 65535 sectors: %d, want 0", res)
+		}
+	}()
+	if data, err := os.ReadFile(disk); err != nil || !bytes.HasPrefix(data, []byte("DATA")) {
+		t.Errorf("block device after BWRITE: % x..., %v; want it to start with \"DATA\"", data[:min(len(data), 8)], err)
+	}
+}
+
 // A WRITE_DATA without a write in progress, such as a chunk the console sent
 // before it got the WRITE_DONE that failed the write, is acknowledged and
 // counted as an error, not as data received

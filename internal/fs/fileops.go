@@ -193,9 +193,10 @@ func (s *Backend) CompleteWrite(handle int32) (n int32, err error) {
 	data := append([]byte(nil), f.wr.dataBuffer...)
 
 	if f.wr.blockWrite {
-		expectedSize := int(f.wr.sectorCount) * sectorSize
-		if len(data) > expectedSize {
-			data = data[:expectedSize]
+		// Write no more than the sectors the write is for. Their size in bytes
+		// can overflow an int on 32-bit builds, so compare whole sectors.
+		if len(data)/sectorSize >= int(f.wr.sectorCount) {
+			data = data[:int(f.wr.sectorCount)*sectorSize]
 		}
 		_, err := f.Seek(f.wr.sectorNumber*int64(sectorSize), 0)
 		if err != nil {
