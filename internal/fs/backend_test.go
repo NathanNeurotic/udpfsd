@@ -9,6 +9,15 @@ import (
 	"github.com/pcm720/udpfsd/internal/fs"
 )
 
+// openFiles returns the number of files open in this process, or -1 where it can't be counted
+func openFiles() int {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1
+	}
+	return len(entries)
+}
+
 // Shutdown closes every handle, the last one in the table included
 func TestShutdownClosesAllHandles(t *testing.T) {
 	root := t.TempDir()
@@ -16,6 +25,7 @@ func TestShutdownClosesAllHandles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	before := openFiles()
 	var handles []int32
 	for i := range 64 {
 		name := strconv.Itoa(i) + ".bin"
@@ -28,12 +38,23 @@ func TestShutdownClosesAllHandles(t *testing.T) {
 		}
 		handles = append(handles, h)
 	}
+	buf := make([]byte, 16)
+	for _, h := range handles {
+		if n, _, err := b.Read(h, 4, buf); err != nil || n != 4 {
+			t.Fatalf("handle %d read %d bytes before Shutdown, %v; want 4 bytes", h, n, err)
+		}
+	}
 
 	b.Shutdown()
-	buf := make([]byte, 16)
 	for _, h := range handles {
 		if n, _, err := b.Read(h, 4, buf); err == nil {
 			t.Errorf("handle %d still read %d bytes after Shutdown", h, n)
+		}
+	}
+	// The files are closed, not only their handles refused
+	if before >= 0 {
+		if open := openFiles() - before; open != 0 {
+			t.Errorf("Shutdown left %d of the 64 files open", open)
 		}
 	}
 }
