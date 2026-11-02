@@ -309,10 +309,14 @@ func (s *Backend) Mkdir(path string) error {
 	if !ok {
 		return os.ErrPermission
 	}
-	if err := os.Mkdir(resolved, 0755); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
+	err := os.Mkdir(resolved, 0755)
+	if errors.Is(err, os.ErrExist) {
+		// An existing directory is not an error, but a file in its place is
+		if st, serr := os.Stat(resolved); serr == nil && st.IsDir() {
+			return nil
+		}
 	}
-	return nil
+	return err
 }
 
 func (s *Backend) Remove(path string) error {

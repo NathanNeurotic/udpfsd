@@ -473,3 +473,24 @@ func TestRmdirDirectory(t *testing.T) {
 		t.Fatalf("RMDIR of an empty directory left it in place: %v", err)
 	}
 }
+
+// MKDIR succeeds for a directory that already exists, but not for a file
+func TestMkdirExistingPath(t *testing.T) {
+	p := newPeer(t)
+	if r := p.pathOp(udpfs.MsgMkdirReq, "APPS"); r != 0 {
+		t.Errorf("MKDIR: %d, want 0", r)
+	}
+	if r := p.pathOp(udpfs.MsgMkdirReq, "APPS"); r != 0 {
+		t.Errorf("MKDIR of an existing directory: %d, want 0", r)
+	}
+	if st, err := os.Stat(p.hostPath("APPS")); err != nil || !st.IsDir() {
+		t.Fatalf("MKDIR did not create a directory: %v", err)
+	}
+
+	if err := os.WriteFile(p.hostPath("OPL.ELF"), []byte("ELF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := p.pathOp(udpfs.MsgMkdirReq, "OPL.ELF"); r != -udpfs.EEXIST {
+		t.Errorf("MKDIR where a file exists: %d, want %d", r, -udpfs.EEXIST)
+	}
+}
