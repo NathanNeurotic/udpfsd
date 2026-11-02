@@ -135,7 +135,8 @@ func NewBackend(opts ...BackendOptFunc) (*Backend, error) {
 }
 
 func (s *Backend) Shutdown() {
-	for fd := range s.handles {
-		s.freeHandle(int32(fd))
+	for idx := range s.handles {
+		// Handle 0 is reserved for block device, so our external handles start with 1
+		s.freeHandle(int32(idx + 1))
 	}
 }
