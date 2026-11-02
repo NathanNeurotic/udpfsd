@@ -416,3 +416,60 @@ func TestGetstatEmptyPath(t *testing.T) {
 		t.Errorf("GETSTAT of an empty path with a block device: result %d, %+v; want 0, size %d", res, st, 64*512)
 	}
 }
+
+const enotdir = 20 // ENOTDIR
+
+// RMDIR removes nothing but directories
+func TestRmdirNotADirectory(t *testing.T) {
+	p := newPeer(t)
+	if err := os.WriteFile(p.hostPath("OPL.ELF"), []byte("ELF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := p.pathOp(udpfs.MsgRmdirReq, "OPL.ELF"); r != -enotdir {
+		t.Errorf("RMDIR of a file: %d, want %d", r, -enotdir)
+	}
+	if _, err := os.Stat(p.hostPath("OPL.ELF")); err != nil {
+		t.Fatalf("RMDIR of a file: %v", err)
+	}
+
+	if err := os.Mkdir(p.hostPath("APPS"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(p.hostPath("APPS"), p.hostPath("LINK")); err != nil {
+		t.Skipf("no symlink to test with: %v", err)
+	}
+	if r := p.pathOp(udpfs.MsgRmdirReq, "LINK"); r != -enotdir {
+		t.Errorf("RMDIR of a symlink to a directory: %d, want %d", r, -enotdir)
+	}
+	if _, err := os.Lstat(p.hostPath("LINK")); err != nil {
+		t.Fatalf("RMDIR of a symlink to a directory: %v", err)
+	}
+}
+
+func TestRmdirDirectory(t *testing.T) {
+	p := newPeer(t)
+	if err := os.MkdirAll(p.hostPath("APPS/OPL"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.hostPath("APPS/OPL/OPL.ELF"), []byte("ELF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"APPS", "APPS/OPL"} {
+		if r := p.pathOp(udpfs.MsgRmdirReq, path); r >= 0 {
+			t.Errorf("RMDIR of %s, which is not empty: %d, want an error", path, r)
+		}
+	}
+	if _, err := os.Stat(p.hostPath("APPS/OPL/OPL.ELF")); err != nil {
+		t.Fatalf("RMDIR of a directory that is not empty: %v", err)
+	}
+
+	if err := os.Remove(p.hostPath("APPS/OPL/OPL.ELF")); err != nil {
+		t.Fatal(err)
+	}
+	if r := p.pathOp(udpfs.MsgRmdirReq, "APPS/OPL"); r != 0 {
+		t.Fatalf("RMDIR of an empty directory: %d", r)
+	}
+	if _, err := os.Stat(p.hostPath("APPS/OPL")); !os.IsNotExist(err) {
+		t.Fatalf("RMDIR of an empty directory left it in place: %v", err)
+	}
+}

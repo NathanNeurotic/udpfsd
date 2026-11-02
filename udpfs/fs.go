@@ -47,15 +47,16 @@ func (e Errno) Error() string {
 }
 
 const (
-	EOK    = 0
-	ENOENT = 2
-	EIO    = 5
-	EBADF  = 9
-	EACCES = 13
-	EEXIST = 17
-	ENODEV = 19
-	EINVAL = 22
-	EMFILE = 24
+	EOK     = 0
+	ENOENT  = 2
+	EIO     = 5
+	EBADF   = 9
+	EACCES  = 13
+	EEXIST  = 17
+	ENODEV  = 19
+	ENOTDIR = 20
+	EINVAL  = 22
+	EMFILE  = 24
 )
 
 // errToErrno maps common errors to PS2 errno (positive); returns 5 for unknown.

@@ -334,6 +334,14 @@ func (s *Backend) Rmdir(path string) error {
 	if !ok {
 		return os.ErrPermission
 	}
+	// os.Remove also removes files and symlinks
+	st, err := os.Lstat(resolved)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() {
+		return udpfs.Errno(-udpfs.ENOTDIR)
+	}
 	return os.Remove(resolved)
 }
 
