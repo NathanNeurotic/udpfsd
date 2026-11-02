@@ -746,3 +746,18 @@ func TestListingUpperCaseCompressedImage(t *testing.T) {
 		}
 	}
 }
+
+// REMOVE and RMDIR never remove the served directory itself, even when it is empty
+func TestRemoveRoot(t *testing.T) {
+	p := newPeer(t)
+	for _, msg := range []udpfs.MsgType{udpfs.MsgRemoveReq, udpfs.MsgRmdirReq} {
+		for _, path := range []string{"", "/", ".", "APPS/.."} {
+			if r := p.pathOp(msg, path); r >= 0 {
+				t.Errorf("%v %q: %d, want an error", msg, path, r)
+			}
+			if st, err := os.Stat(p.root); err != nil || !st.IsDir() {
+				t.Fatalf("served directory after %v %q: %v", msg, path, err)
+			}
+		}
+	}
+}

@@ -324,7 +324,8 @@ func (s *Backend) Remove(path string) error {
 		return os.ErrPermission
 	}
 	resolved, ok := s.resolvePath(path)
-	if !ok {
+	if !ok || resolved == filepath.Clean(s.fsRoot) {
+		// Never remove the served directory itself
 		return os.ErrPermission
 	}
 	return os.Remove(resolved)
@@ -335,7 +336,8 @@ func (s *Backend) Rmdir(path string) error {
 		return os.ErrPermission
 	}
 	resolved, ok := s.resolvePath(path)
-	if !ok {
+	if !ok || resolved == filepath.Clean(s.fsRoot) {
+		// Never remove the served directory itself
 		return os.ErrPermission
 	}
 	// os.Remove also removes files and symlinks
