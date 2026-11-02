@@ -186,6 +186,7 @@ func GetStat(path string) *common.CompressedInfo {
 	if err != nil {
 		return nil
 	}
+	defer f.Close()
 
 	b := make([]byte, 16)
 	if _, err := io.ReadFull(f, b); err != nil {

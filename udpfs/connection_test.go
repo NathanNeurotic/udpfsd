@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"testing"
@@ -177,6 +178,58 @@ func (p *peer) getstat(path string) (int32, udpfs.StatInfo) {
 	copy(st.Atime[:], reply[32:])
 	copy(st.Mtime[:], reply[40:])
 	return result(reply), st
+}
+
+// dirEntry is a directory entry as DREAD reports it
+type dirEntry struct {
+	name string
+	mode uint32
+	size uint32
+}
+
+func (p *peer) opendir(path string) int32 {
+	p.t.Helper()
+	req := make([]byte, 8)
+	req[0] = byte(udpfs.MsgOpenReq)
+	req[1] = 1 // is_dir
+	h := result(p.request(withPath(req, path), udpfs.MsgOpenReply))
+	if h <= 0 {
+		p.t.Fatalf("OPEN directory %q: %d", path, h)
+	}
+	return h
+}
+
+// readdir sends DREAD until the end of the directory and closes it
+func (p *peer) readdir(handle int32) []dirEntry {
+	p.t.Helper()
+	var entries []dirEntry
+	for {
+		req := make([]byte, 8)
+		req[0] = byte(udpfs.MsgDreadReq)
+		binary.LittleEndian.PutUint32(req[4:], uint32(handle))
+		reply := p.request(req, udpfs.MsgDreadReply)
+		if r := result(reply); r < 0 {
+			p.t.Fatalf("DREAD: %d", r)
+		} else if r == 0 {
+			break
+		}
+		nameLen := int(binary.LittleEndian.Uint16(reply[2:]))
+		entries = append(entries, dirEntry{
+			name: string(reply[48 : 48+nameLen]),
+			mode: binary.LittleEndian.Uint32(reply[8:]),
+			size: binary.LittleEndian.Uint32(reply[16:]),
+		})
+	}
+	if r := p.close(handle); r != 0 {
+		p.t.Fatalf("CLOSE directory: %d", r)
+	}
+	return entries
+}
+
+// list returns the entries of a directory in the order DREAD reports them
+func (p *peer) list(path string) []dirEntry {
+	p.t.Helper()
+	return p.readdir(p.opendir(path))
 }
 
 // pathOp sends MKDIR, REMOVE or RMDIR and returns the result
@@ -574,4 +627,59 @@ func TestInvalidHandleOrSize(t *testing.T) {
 			t.Errorf("BREAD of 65535 sectors of 64 KB: %d, want an error", res)
 		}
 	}()
+}
+
+// copyTestImage copies a file from the compression test data into the served directory
+func (p *peer) copyTestImage(name, path string) {
+	p.t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "internal", "fs", "compression", "test", name))
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	if err := os.WriteFile(p.hostPath(path), data, 0o644); err != nil {
+		p.t.Fatal(err)
+	}
+}
+
+// openFiles returns the number of files open in this process
+func openFiles(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("cannot count open files: %v", err)
+	}
+	return len(entries)
+}
+
+// Listing compressed images and GETSTAT of their .iso names read the image
+// headers, and must close the images afterwards
+func TestCompressedImageStatClosesFiles(t *testing.T) {
+	openFiles(t) // skip early where open files cannot be counted
+	p := newPeer(t, fs.WithCompression())
+	p.copyTestImage("test.cso", "a.cso")
+	p.copyTestImage("test.zso", "b.zso")
+	// The garbage collector closes files nothing refers to, which would hide a leak
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+
+	before := openFiles(t)
+	for range 10 {
+		if got := p.list(""); len(got) != 2 {
+			t.Fatalf("listing: %+v, want 2 entries", got)
+		}
+	}
+	if leaked := openFiles(t) - before; leaked != 0 {
+		t.Errorf("listing 2 compressed images 10 times left %d files open", leaked)
+	}
+
+	before = openFiles(t)
+	for range 10 {
+		for _, name := range []string{"a.cso.iso", "b.zso.iso"} {
+			if res, _ := p.getstat(name); res != 0 {
+				t.Fatalf("GETSTAT %s: %d", name, res)
+			}
+		}
+	}
+	if leaked := openFiles(t) - before; leaked != 0 {
+		t.Errorf("GETSTAT of 2 compressed images 10 times left %d files open", leaked)
+	}
 }
