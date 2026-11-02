@@ -43,6 +43,12 @@ type peer struct {
 
 func newPeer(t *testing.T, opts ...fs.BackendOptFunc) *peer {
 	t.Helper()
+	return newPeerConn(t, false, opts...)
+}
+
+// newPeerConn is newPeer with the connection's metrics collection on or off
+func newPeerConn(t *testing.T, metrics bool, opts ...fs.BackendOptFunc) *peer {
+	t.Helper()
 	p := &peer{
 		t:    t,
 		root: filepath.Join(t.TempDir(), "root"), // the parent is free for files outside the root
@@ -56,7 +62,7 @@ func newPeer(t *testing.T, opts ...fs.BackendOptFunc) *peer {
 		t.Fatal(err)
 	}
 	p.sess = udprdma.NewSession(*p.addr, p.receive, nil)
-	p.conn = udpfs.NewConnection(p.sess, backend, false, false)
+	p.conn = udpfs.NewConnection(p.sess, backend, false, metrics)
 	t.Cleanup(p.conn.Close)
 	return p
 }
@@ -79,6 +85,20 @@ func (p *peer) reboot() {
 // request sends req and returns the last reply of type want
 func (p *peer) request(req []byte, want udpfs.MsgType) []byte {
 	p.t.Helper()
+	replies := p.send(req)
+	for i := len(replies) - 1; i >= 0; i-- {
+		if r := replies[i]; len(r) >= 8 && udpfs.MsgType(r[0]) == want {
+			return r
+		}
+	}
+	p.t.Fatalf("no reply 0x%02x to %v request", uint8(want), udpfs.MsgType(req[0]))
+	return nil
+}
+
+// send sends req and returns the UDPFS payloads of all packets the server sent in reply
+// (empty for an ACK)
+func (p *peer) send(req []byte) [][]byte {
+	p.t.Helper()
 	padded := (len(req) + 3) &^ 3
 	pkt := make([]byte, 6+padded)
 	udprdma.Header{PacketType: udprdma.PacketData, SeqNr: p.seq}.Pack(pkt)
@@ -98,13 +118,7 @@ func (p *peer) request(req []byte, want udpfs.MsgType) []byte {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for i := len(p.replies) - 1; i >= 0; i-- {
-		if r := p.replies[i]; len(r) >= 8 && udpfs.MsgType(r[0]) == want {
-			return r
-		}
-	}
-	p.t.Fatalf("no reply 0x%02x to %v request", uint8(want), udpfs.MsgType(req[0]))
-	return nil
+	return p.replies
 }
 
 // result returns the handle or result field of a reply
@@ -656,6 +670,24 @@ func TestInvalidHandleOrSize(t *testing.T) {
 			t.Errorf("BREAD of 65535 sectors of 64 KB: %d, want an error", res)
 		}
 	}()
+}
+
+// A WRITE_DATA without a write in progress, such as a chunk the console sent
+// before it got the WRITE_DONE that failed the write, is acknowledged and
+// counted as an error, not as data received
+func TestWriteDataWithoutWrite(t *testing.T) {
+	p := newPeerConn(t, true)
+	// WRITE_DATA header of a single 4-byte chunk, and the chunk
+	chunk := []byte{byte(udpfs.MsgWriteData), 0, 0, 0, 4, 0, 1, 0, 'D', 'A', 'T', 'A'}
+	for _, r := range p.send(chunk) {
+		if len(r) != 0 {
+			t.Fatalf("reply to WRITE_DATA without a write: % x, want ACKs only", r)
+		}
+	}
+	m := p.conn.GetMetrics()
+	if errs := m.ErrorCounts[udpfs.MsgWriteData]; errs != 1 || m.BytesRx != 0 {
+		t.Fatalf("metrics after WRITE_DATA without a write: %d errors, %d bytes received; want 1 error, 0 bytes", errs, m.BytesRx)
+	}
 }
 
 // copyTestImage copies a file from the compression test data into the served directory

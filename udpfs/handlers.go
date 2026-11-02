@@ -220,7 +220,7 @@ func (c *Connection) handleWriteData(addr *net.UDPAddr, payload []byte) int {
 	handle := c.getWriteHandle()
 	if handle == -1 {
 		c.SendACK(addr, true)
-		return EBADF
+		return -EBADF
 	}
 
 	chunkNr := binary.LittleEndian.Uint16(payload[2:4])
