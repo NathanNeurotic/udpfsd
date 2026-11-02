@@ -20,6 +20,12 @@ var (
 	Extensions = []string{".zso", ".ziso"}
 )
 
+// maxTrim is the most ReadBlock trims off the end of what it reads for an LZ4
+// block to find where the block's data ends. The padding after a block is
+// shorter than the alignment of the image, at most 2 KiB in images OPL reads,
+// and ReadBlock reads at most 4 KiB for a 2048-byte block.
+const maxTrim = 4 << 10
+
 // ZSO implements BlockReader for ZSO/ZISO (LZ4 block-based) format.
 type ZSO struct {
 	f          *os.File
@@ -190,14 +196,14 @@ func (z *ZSO) ReadBlock(blockIdx int) ([]byte, error) {
 		return out, nil
 	}
 	// LZ4 with OPL-style retry (trim trailing byte for alignment padding).
-	// Each attempt writes out from the start.
+	// Each attempt writes out from the start, and can decode most of a block
+	// before it fails, so trim no more than maxTrim bytes.
 	out := make([]byte, z.blockSize)
-	for len(compressed) > 0 {
-		n, err := lz4.UncompressBlock(compressed, out)
+	for trim := range min(maxTrim, len(compressed)) {
+		n, err := lz4.UncompressBlock(compressed[:len(compressed)-trim], out)
 		if err == nil {
 			return out[:n], nil
 		}
-		compressed = compressed[:len(compressed)-1]
 	}
 	return nil, fmt.Errorf("LZ4 decompression failed for block %d", blockIdx)
 }

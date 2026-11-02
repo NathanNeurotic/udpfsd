@@ -1377,3 +1377,32 @@ func TestCompressedImageBlockSpanningFile(t *testing.T) {
 		p.close(h)
 	}
 }
+
+// With blocks larger than 2048 bytes, READ of a ZSO block whose next entry in
+// the block map is far away fails, rather than decoding most of the block once
+// for every length up to twice the block size: with blocks of 128 KiB, that took
+// 19 seconds
+func TestLargeZSOBlockSpanningFile(t *testing.T) {
+	p := newPeer(t, fs.WithCompression())
+	const blockSize = 16 << 10
+	data := make([]byte, blockSize)
+	copy(data, "the first block")
+	// The block's data, then zeros up to the next entry of the block map
+	img := append(compressedImage("ZISO", blockSize, blockSize, []uint32{32, 32 + 2*blockSize}, 0),
+		lz4Compressed(t, data)...)
+	img = append(img, make([]byte, 32+2*blockSize-len(img))...)
+	if err := os.WriteFile(p.hostPath("c.zso"), img, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := p.open("c.zso.iso", fioRdonly)
+	if h <= 0 {
+		t.Fatalf("OPEN: %d", h)
+	}
+	req := make([]byte, 12)
+	req[0] = byte(udpfs.MsgReadReq)
+	binary.LittleEndian.PutUint32(req[4:], uint32(h))
+	binary.LittleEndian.PutUint32(req[8:], 64)
+	if res := result(p.request(req, udpfs.MsgResultReply)); res >= 0 {
+		t.Errorf("READ: %d, want an error", res)
+	}
+}
