@@ -17,6 +17,10 @@ func (s *Backend) Open(path string, flag int, isDir bool) (handle int32, stat ud
 	// Get full path
 	fullPath, ok := s.resolvePath(path)
 	if !ok {
+		if s.fsRoot != "" {
+			// The path leads out of the served directory
+			return 0, udpfs.StatInfo{}, os.ErrPermission
+		}
 		return 0, udpfs.StatInfo{}, os.ErrNotExist
 	}
 
@@ -280,6 +284,10 @@ func (s *Backend) Getstat(path string) (stat udpfs.StatInfo, err error) {
 
 	resolved, ok := s.resolvePath(path)
 	if !ok {
+		if s.fsRoot != "" {
+			// The path leads out of the served directory
+			return stat, os.ErrPermission
+		}
 		return stat, os.ErrInvalid
 	}
 

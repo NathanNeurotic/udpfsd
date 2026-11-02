@@ -981,3 +981,35 @@ func TestRemoveRoot(t *testing.T) {
 		}
 	}
 }
+
+// Every request for a path outside of the served directory fails with -EACCES,
+// which UDPFS.md gives for path traversal, and leaves the files there alone
+func TestPathOutsideRoot(t *testing.T) {
+	p := newPeer(t)
+	outside := filepath.Join(p.root, "..", "outside.elf")
+	if err := os.WriteFile(outside, []byte("ELF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"../outside.elf", "APPS/../../outside.elf", ".."} {
+		for _, flags := range []uint16{fioRdonly, fioWronly | fioCreat | fioTrunc} {
+			if h := p.open(path, flags); h != -udpfs.EACCES {
+				t.Errorf("OPEN %s with flags 0x%x: %d, want %d", path, flags, h, -udpfs.EACCES)
+			}
+		}
+		req := []byte{byte(udpfs.MsgOpenReq), 1, 0, 0, 0, 0, 0, 0} // is_dir
+		if h := result(p.request(withPath(req, path), udpfs.MsgOpenReply)); h != -udpfs.EACCES {
+			t.Errorf("OPEN directory %s: %d, want %d", path, h, -udpfs.EACCES)
+		}
+		if res, _ := p.getstat(path); res != -udpfs.EACCES {
+			t.Errorf("GETSTAT %s: %d, want %d", path, res, -udpfs.EACCES)
+		}
+		for _, msg := range []udpfs.MsgType{udpfs.MsgMkdirReq, udpfs.MsgRemoveReq, udpfs.MsgRmdirReq} {
+			if r := p.pathOp(msg, path); r != -udpfs.EACCES {
+				t.Errorf("%v %s: %d, want %d", msg, path, r, -udpfs.EACCES)
+			}
+		}
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "ELF" {
+		t.Errorf("file outside of the served directory: %q, %v; want \"ELF\"", data, err)
+	}
+}
