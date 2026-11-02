@@ -82,7 +82,12 @@ func (c *Connection) handleOpen(addr *net.UDPAddr, payload []byte) int {
 				if c.verbose {
 					log.Printf("[%s]: reusing file handle %d for %s (mode %x)", addr, h, path, flag)
 				}
-				c.SendOpenReply(addr, h, StatInfo{})
+				// Reply with the file's stat, as for a file opened afresh
+				stat, err := c.fs.Getstat(path)
+				if err != nil {
+					stat = StatInfo{}
+				}
+				c.SendOpenReply(addr, h, stat)
 				return 0
 			}
 		}

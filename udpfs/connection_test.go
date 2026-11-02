@@ -139,10 +139,25 @@ func withPath(hdr []byte, path string) []byte {
 
 func (p *peer) open(path string, flags uint16) int32 {
 	p.t.Helper()
+	h, _ := p.openStat(path, flags)
+	return h
+}
+
+// openStat sends OPEN and returns the handle and the stat fields of the reply
+// (OPEN_REPLY has no attr and atime)
+func (p *peer) openStat(path string, flags uint16) (int32, udpfs.StatInfo) {
+	p.t.Helper()
 	req := make([]byte, 8)
 	req[0] = byte(udpfs.MsgOpenReq)
 	binary.LittleEndian.PutUint16(req[2:], flags)
-	return result(p.request(withPath(req, path), udpfs.MsgOpenReply))
+	reply := p.request(withPath(req, path), udpfs.MsgOpenReply)
+	var st udpfs.StatInfo
+	st.Mode = binary.LittleEndian.Uint32(reply[8:])
+	st.Size = binary.LittleEndian.Uint32(reply[12:])
+	st.Hisize = binary.LittleEndian.Uint32(reply[16:])
+	copy(st.Ctime[:], reply[20:])
+	copy(st.Mtime[:], reply[28:])
+	return result(reply), st
 }
 
 func (p *peer) close(handle int32) int32 {
@@ -363,9 +378,10 @@ func TestReadAfterResetWhileOpenForWriting(t *testing.T) {
 }
 
 // A console reset while reading a file (a game, say) gets the same handle
-// back when it opens the file for reading again, positioned at the start
+// back when it opens the file for reading again, positioned at the start,
+// and the same stat in OPEN_REPLY as when it opened the file
 func TestReopenForReadingAfterResetReusesHandle(t *testing.T) {
-	p := newPeer(t)
+	p := newPeer(t, fs.WithCompression())
 	data := []byte("game data at the start of the file")
 	if err := os.WriteFile(p.hostPath("game.iso"), data, 0o644); err != nil {
 		t.Fatal(err)
@@ -373,11 +389,16 @@ func TestReopenForReadingAfterResetReusesHandle(t *testing.T) {
 	if err := os.WriteFile(p.hostPath("SYSTEM.CNF"), []byte("BOOT2"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	p.copyTestImage("test.cso", "game2.cso")
 	// Leave a lower handle free, so that opening the file afresh would return another handle
 	cnf := p.open("SYSTEM.CNF", fioRdonly)
-	h := p.open("game.iso", fioRdonly)
-	if cnf <= 0 || h <= 0 {
-		t.Fatalf("OPEN: %d, %d", cnf, h)
+	h, st := p.openStat("game.iso", fioRdonly)
+	h2, st2 := p.openStat("game2.cso.iso", fioRdonly)
+	if cnf <= 0 || h <= 0 || h2 <= 0 {
+		t.Fatalf("OPEN: %d, %d, %d", cnf, h, h2)
+	}
+	if st.Mode != udpfs.FIO_S_IFREG || st.Size != uint32(len(data)) || st2.Mode != udpfs.FIO_S_IFREG || st2.Size == 0 {
+		t.Fatalf("OPEN_REPLY: %+v and %+v, want regular files of %d bytes and of the ISO image's size", st, st2, len(data))
 	}
 	if r := p.close(cnf); r != 0 {
 		t.Fatalf("CLOSE: %d", r)
@@ -385,8 +406,14 @@ func TestReopenForReadingAfterResetReusesHandle(t *testing.T) {
 	p.read(h, 8)
 	p.reboot()
 
-	if h2 := p.open("game.iso", fioRdonly); h2 != h {
-		t.Fatalf("OPEN after reset returned handle %d, want the cached handle %d", h2, h)
+	for _, f := range []struct {
+		path   string
+		handle int32
+		stat   udpfs.StatInfo
+	}{{"game.iso", h, st}, {"game2.cso.iso", h2, st2}} {
+		if got, gotStat := p.openStat(f.path, fioRdonly); got != f.handle || gotStat != f.stat {
+			t.Errorf("OPEN %s after reset: handle %d, %+v; want the cached handle %d, %+v", f.path, got, gotStat, f.handle, f.stat)
+		}
 	}
 	if got := p.read(h, uint32(len(data))); !bytes.Equal(got, data) {
 		t.Fatalf("READ after reset returned %q, want %q", got, data)
@@ -991,19 +1018,10 @@ func TestOpenCompressedImageStat(t *testing.T) {
 		if err := os.Chtimes(p.hostPath(image), mtime, mtime); err != nil {
 			t.Fatal(err)
 		}
-		req := make([]byte, 8)
-		req[0] = byte(udpfs.MsgOpenReq)
-		binary.LittleEndian.PutUint16(req[2:], fioRdonly)
-		reply := p.request(withPath(req, image+".iso"), udpfs.MsgOpenReply)
-		if h := result(reply); h <= 0 {
+		h, got := p.openStat(image+".iso", fioRdonly)
+		if h <= 0 {
 			t.Fatalf("OPEN %s.iso: %d", image, h)
 		}
-		var got udpfs.StatInfo // OPEN_REPLY has no attr and atime
-		got.Mode = binary.LittleEndian.Uint32(reply[8:])
-		got.Size = binary.LittleEndian.Uint32(reply[12:])
-		got.Hisize = binary.LittleEndian.Uint32(reply[16:])
-		copy(got.Ctime[:], reply[20:])
-		copy(got.Mtime[:], reply[28:])
 		if got != want {
 			t.Errorf("OPEN_REPLY of %s.iso: %+v, want %+v", image, got, want)
 		}
