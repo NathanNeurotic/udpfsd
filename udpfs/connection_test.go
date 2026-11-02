@@ -24,6 +24,7 @@ import (
 const (
 	fioRdonly = 0x0001
 	fioWronly = 0x0002
+	fioRdwr   = 0x0003
 	fioCreat  = 0x0200
 	fioTrunc  = 0x0400
 )
@@ -51,6 +52,12 @@ func newPeer(t *testing.T, opts ...fs.BackendOptFunc) *peer {
 // newPeerConn is newPeer with the connection's metrics collection on or off
 func newPeerConn(t *testing.T, metrics bool, opts ...fs.BackendOptFunc) *peer {
 	t.Helper()
+	return newPeerWrapped(t, metrics, nil, opts...)
+}
+
+// newPeerWrapped is newPeerConn with the connection using wrap(backend) when wrap is not nil
+func newPeerWrapped(t *testing.T, metrics bool, wrap func(udpfs.FS) udpfs.FS, opts ...fs.BackendOptFunc) *peer {
+	t.Helper()
 	p := &peer{
 		t:    t,
 		root: filepath.Join(t.TempDir(), "root"), // the parent is free for files outside the root
@@ -63,8 +70,12 @@ func newPeerConn(t *testing.T, metrics bool, opts ...fs.BackendOptFunc) *peer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var fsys udpfs.FS = backend
+	if wrap != nil {
+		fsys = wrap(backend)
+	}
 	p.sess = udprdma.NewSession(*p.addr, p.receive, nil)
-	p.conn = udpfs.NewConnection(p.sess, backend, false, metrics)
+	p.conn = udpfs.NewConnection(p.sess, fsys, false, metrics)
 	t.Cleanup(p.conn.Close)
 	return p
 }
@@ -445,6 +456,97 @@ func TestRemoveAfterResetWhileOpenForReading(t *testing.T) {
 	}
 	if h2 := p.open("OPL.ELF", fioRdonly); h2 != -udpfs.ENOENT {
 		t.Errorf("OPEN for reading after REMOVE: %d, want %d", h2, -udpfs.ENOENT)
+	}
+}
+
+// A file the console had open for reading and writing (a VMC image, say) when
+// it was reset is opened afresh when the console opens it again, as the file
+// at the path may have been replaced since
+func TestReopenForReadWriteAfterReset(t *testing.T) {
+	p := newPeer(t)
+	if err := os.WriteFile(p.hostPath("vmc.bin"), []byte("old card"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := p.open("vmc.bin", fioRdwr)
+	if h <= 0 {
+		t.Fatalf("OPEN for reading and writing: %d", h)
+	}
+	p.read(h, 4)
+	p.reboot()
+
+	// Replace the file, as a tool on the PC would
+	if err := os.WriteFile(p.hostPath("vmc.new"), []byte("new card"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(p.hostPath("vmc.new"), p.hostPath("vmc.bin")); err != nil {
+		t.Skipf("cannot replace a file that is open: %v", err)
+	}
+	h = p.open("vmc.bin", fioRdwr)
+	if h <= 0 {
+		t.Fatalf("OPEN for reading and writing after reset: %d", h)
+	}
+	if got := p.read(h, 64); string(got) != "new card" {
+		t.Fatalf("READ after reset: %q, want %q", got, "new card")
+	}
+}
+
+// noRemoveWhileOpen refuses to remove a file while a handle is open on it, as Windows does
+type noRemoveWhileOpen struct {
+	udpfs.FS
+	mu   sync.Mutex
+	open map[int32]string // path of every open file handle
+}
+
+func (n *noRemoveWhileOpen) Open(path string, flag int, isDir bool) (int32, udpfs.StatInfo, error) {
+	h, st, err := n.FS.Open(path, flag, isDir)
+	if err == nil && h > 0 && !isDir {
+		n.mu.Lock()
+		n.open[h] = path
+		n.mu.Unlock()
+	}
+	return h, st, err
+}
+
+func (n *noRemoveWhileOpen) Close(handle int32) error {
+	n.mu.Lock()
+	delete(n.open, handle)
+	n.mu.Unlock()
+	return n.FS.Close(handle)
+}
+
+func (n *noRemoveWhileOpen) Remove(path string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, p := range n.open {
+		if p == path {
+			return os.ErrPermission
+		}
+	}
+	return n.FS.Remove(path)
+}
+
+// REMOVE of a file the console was reading when it was reset closes the
+// handle the reset left before it removes the file, which Windows refuses
+// to remove while it is open
+func TestRemoveAfterResetClosesHandleFirst(t *testing.T) {
+	p := newPeerWrapped(t, false, func(backend udpfs.FS) udpfs.FS {
+		return &noRemoveWhileOpen{FS: backend, open: map[int32]string{}}
+	})
+	if err := os.WriteFile(p.hostPath("OPL.ELF"), bytes.Repeat([]byte{'O'}, 300), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := p.open("OPL.ELF", fioRdonly)
+	if h <= 0 {
+		t.Fatalf("OPEN for reading: %d", h)
+	}
+	p.read(h, 8)
+	p.reboot()
+
+	if r := p.pathOp(udpfs.MsgRemoveReq, "OPL.ELF"); r != 0 {
+		t.Fatalf("REMOVE: %d, want 0", r)
+	}
+	if _, err := os.Stat(p.hostPath("OPL.ELF")); !os.IsNotExist(err) {
+		t.Fatalf("file after REMOVE: %v", err)
 	}
 }
 
