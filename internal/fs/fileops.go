@@ -233,33 +233,28 @@ func (s *Backend) Dread(handle int32) (ok bool, name string, stat udpfs.StatInfo
 	d.Lock()
 	defer d.Unlock()
 
-	if d.index >= len(d.entries) {
-		return false, "", udpfs.StatInfo{}, nil
-	}
-	entry := d.entries[d.index]
-	d.index++
-	dirPath := d.dirPath
+	// Returning no entry ends the listing, so skip entries that can't be listed instead
+	for d.index < len(d.entries) {
+		entry := d.entries[d.index]
+		d.index++
 
-	info, err := entry.Info()
-	if err != nil {
-		return false, "", udpfs.StatInfo{}, nil
-	}
-	name = entry.Name()
-
-	var st udpfs.StatInfo
-	// If compression is enabled and file has one of supported compressed ISO extensions, append .iso
-	if s.enableCompression && slices.Contains(compression.GetSupportedExtensions(), filepath.Ext(name)) {
-		name = name + ".iso"
-		entryPath := filepath.Join(dirPath, entry.Name())
-		cst := compression.GetStat(entryPath)
-		if cst == nil {
-			return false, "", udpfs.StatInfo{}, nil
+		info, err := entry.Info()
+		if err != nil {
+			// Entry was removed after the directory was opened
+			continue
 		}
-		st = udpfs.StatInfoFromFile(cst)
-	} else {
-		st = udpfs.StatInfoFromFile(info)
+		name = entry.Name()
+
+		// If compression is enabled and file has one of supported compressed ISO extensions, append .iso
+		if s.enableCompression && slices.Contains(compression.GetSupportedExtensions(), filepath.Ext(name)) {
+			if cst := compression.GetStat(filepath.Join(d.dirPath, name)); cst != nil {
+				return true, name + ".iso", udpfs.StatInfoFromFile(cst), nil
+			}
+			// Not a valid compressed image: list it as the plain file Open finds under this name
+		}
+		return true, name, udpfs.StatInfoFromFile(info), nil
 	}
-	return true, name, st, nil
+	return false, "", udpfs.StatInfo{}, nil
 }
 
 func (s *Backend) Getstat(path string) (stat udpfs.StatInfo, err error) {

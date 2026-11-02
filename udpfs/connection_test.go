@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -681,5 +682,46 @@ func TestCompressedImageStatClosesFiles(t *testing.T) {
 	}
 	if leaked := openFiles(t) - before; leaked != 0 {
 		t.Errorf("GETSTAT of 2 compressed images 10 times left %d files open", leaked)
+	}
+}
+
+// A file removed while the directory is open is left out of the listing,
+// and the entries after it are still listed
+func TestListingSkipsRemovedFile(t *testing.T) {
+	p := newPeer(t)
+	for _, name := range []string{"a.elf", "b.elf", "c.elf"} {
+		if err := os.WriteFile(p.hostPath(name), []byte("ELF"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := p.opendir("")
+	if err := os.Remove(p.hostPath("b.elf")); err != nil {
+		t.Fatal(err)
+	}
+	want := []dirEntry{{"a.elf", udpfs.FIO_S_IFREG, 3}, {"c.elf", udpfs.FIO_S_IFREG, 3}}
+	if got := p.readdir(h); !slices.Equal(got, want) {
+		t.Fatalf("listing after b.elf was removed: %+v, want %+v", got, want)
+	}
+}
+
+// A file with the extension of a compressed image that is not a valid image
+// is listed as the plain file OPEN finds under that name, and the entries
+// after it are still listed
+func TestListingInvalidCompressedImage(t *testing.T) {
+	p := newPeer(t, fs.WithCompression())
+	for name, data := range map[string]string{"a.iso": "ISO", "b.cso": "not a CSO image", "c.zso": ""} {
+		if err := os.WriteFile(p.hostPath(name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p.copyTestImage("test.cso", "d.cso")
+	want := []dirEntry{
+		{"a.iso", udpfs.FIO_S_IFREG, 3},
+		{"b.cso", udpfs.FIO_S_IFREG, 15},
+		{"c.zso", udpfs.FIO_S_IFREG, 0},
+		{"d.cso.iso", udpfs.FIO_S_IFREG, 1110016},
+	}
+	if got := p.list(""); !slices.Equal(got, want) {
+		t.Fatalf("listing: %+v, want %+v", got, want)
 	}
 }
