@@ -4,18 +4,31 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/pcm720/udpfsd/internal/fs"
 )
 
-// openFiles returns the number of files open in this process, or -1 where it can't be counted
-func openFiles() int {
+// openFiles returns the number of files this process has open in dir, or -1
+// where it can't be counted. Files that other tests left for the garbage
+// collector to close, which it can do at any time, don't count.
+func openFiles(dir string) int {
 	entries, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
 		return -1
 	}
-	return len(entries)
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return -1
+	}
+	n := 0
+	for _, e := range entries {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err == nil && strings.HasPrefix(target, dir+string(filepath.Separator)) {
+			n++
+		}
+	}
+	return n
 }
 
 // Shutdown closes every handle, the last one in the table included
@@ -25,7 +38,7 @@ func TestShutdownClosesAllHandles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := openFiles()
+	before := openFiles(root)
 	var handles []int32
 	for i := range 64 {
 		name := strconv.Itoa(i) + ".bin"
@@ -53,7 +66,7 @@ func TestShutdownClosesAllHandles(t *testing.T) {
 	}
 	// The files are closed, not only their handles refused
 	if before >= 0 {
-		if open := openFiles() - before; open != 0 {
+		if open := openFiles(root) - before; open != 0 {
 			t.Errorf("Shutdown left %d of the 64 files open", open)
 		}
 	}
