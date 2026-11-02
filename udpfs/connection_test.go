@@ -625,6 +625,18 @@ func TestGetstatCompressedImage(t *testing.T) {
 	if res, st := p.getstat("game.cso.iso"); res != 0 || st.Mode != udpfs.FIO_S_IFREG || st.Size != uint32(iso.Size()) || st.Hisize != 0 {
 		t.Fatalf("GETSTAT of a compressed image: result %d, %+v; want 0, a regular file of %d bytes", res, st, iso.Size())
 	}
+
+	// Without decompression, OPEN doesn't find the image as <name>.iso, and neither does GETSTAT
+	p = newPeer(t)
+	if err := os.WriteFile(p.hostPath("game.cso"), cso, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res, st := p.getstat("game.cso.iso"); res != -udpfs.ENOENT {
+		t.Errorf("GETSTAT of a compressed image without decompression: result %d, %+v; want %d", res, st, -udpfs.ENOENT)
+	}
+	if h := p.open("game.cso.iso", fioRdonly); h != -udpfs.ENOENT {
+		t.Errorf("OPEN of a compressed image without decompression: %d, want %d", h, -udpfs.ENOENT)
+	}
 }
 
 // An empty path asks for the block device, never for the served directory
@@ -996,6 +1008,11 @@ func TestListingSymlinks(t *testing.T) {
 	}
 	if got := p.list(""); !slices.Equal(got, want) {
 		t.Fatalf("listing: %+v, want %+v", got, want)
+	}
+	for _, e := range want {
+		if res, st := p.getstat(e.name); res != 0 || st.Mode != e.mode || st.Size != e.size {
+			t.Errorf("GETSTAT %s: result %d, mode 0x%x, size %d; want 0, mode 0x%x, size %d", e.name, res, st.Mode, st.Size, e.mode, e.size)
+		}
 	}
 }
 
