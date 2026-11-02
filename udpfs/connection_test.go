@@ -747,6 +747,36 @@ func TestListingUpperCaseCompressedImage(t *testing.T) {
 	}
 }
 
+// A symlink is listed with the type and size of what it points to, which is
+// what OPEN and GETSTAT find under its name
+func TestListingSymlinks(t *testing.T) {
+	p := newPeer(t)
+	if err := os.WriteFile(p.hostPath("a.elf"), []byte("ELF data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(p.hostPath("b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for link, target := range map[string]string{"c.elf": "a.elf", "d": "b"} {
+		if err := os.Symlink(target, p.hostPath(link)); err != nil {
+			t.Skipf("cannot create symlinks: %v", err)
+		}
+	}
+	dir, err := os.Stat(p.hostPath("b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []dirEntry{
+		{"a.elf", udpfs.FIO_S_IFREG, 8},
+		{"b", udpfs.FIO_S_IFDIR, uint32(dir.Size())},
+		{"c.elf", udpfs.FIO_S_IFREG, 8},
+		{"d", udpfs.FIO_S_IFDIR, uint32(dir.Size())},
+	}
+	if got := p.list(""); !slices.Equal(got, want) {
+		t.Fatalf("listing: %+v, want %+v", got, want)
+	}
+}
+
 // REMOVE and RMDIR never remove the served directory itself, even when it is empty
 func TestRemoveRoot(t *testing.T) {
 	p := newPeer(t)

@@ -244,11 +244,18 @@ func (s *Backend) Dread(handle int32) (ok bool, name string, stat udpfs.StatInfo
 			continue
 		}
 		name = entry.Name()
+		entryPath := filepath.Join(d.dirPath, name)
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Report what the symlink points to, as Open and Getstat follow symlinks
+			if st, err := os.Stat(entryPath); err == nil {
+				info = st
+			}
+		}
 
 		// If compression is enabled and file has one of supported compressed ISO extensions, append .iso
 		// Extensions are matched regardless of case, like Open does
 		if s.enableCompression && slices.Contains(compression.GetSupportedExtensions(), strings.ToLower(filepath.Ext(name))) {
-			if cst := compression.GetStat(filepath.Join(d.dirPath, name)); cst != nil {
+			if cst := compression.GetStat(entryPath); cst != nil {
 				return true, name + ".iso", udpfs.StatInfoFromFile(cst), nil
 			}
 			// Not a valid compressed image: list it as the plain file Open finds under this name
