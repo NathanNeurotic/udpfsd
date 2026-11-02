@@ -1071,6 +1071,13 @@ func TestCorruptCompressedImage(t *testing.T) {
 		images[name] = compressedImage(magic, 2048, 2048, []uint32{0, 0x7FFFFFFF}, 16)
 		images[name][21] = 20 // align
 	}
+	// One block whose data is in the file and decompresses, but which the block
+	// map says ends 2 GB into the file, past its end
+	block := make([]byte, 2048)
+	images["pastend.cso"] = append(append(compressedImage("CISO", 2048, 2048, []uint32{32, 0x7FFFFFFF}, 0),
+		deflated(t, block)...), make([]byte, 4096)...)
+	images["pastend.zso"] = append(append(compressedImage("ZISO", 2048, 2048, []uint32{32, 0x7FFFFFFF}, 0),
+		lz4Compressed(t, block)...), make([]byte, 4096)...)
 	for name, data := range images {
 		if err := os.WriteFile(p.hostPath(name), data, 0o644); err != nil {
 			t.Fatal(err)
