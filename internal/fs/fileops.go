@@ -246,7 +246,8 @@ func (s *Backend) Dread(handle int32) (ok bool, name string, stat udpfs.StatInfo
 		name = entry.Name()
 
 		// If compression is enabled and file has one of supported compressed ISO extensions, append .iso
-		if s.enableCompression && slices.Contains(compression.GetSupportedExtensions(), filepath.Ext(name)) {
+		// Extensions are matched regardless of case, like Open does
+		if s.enableCompression && slices.Contains(compression.GetSupportedExtensions(), strings.ToLower(filepath.Ext(name))) {
 			if cst := compression.GetStat(filepath.Join(d.dirPath, name)); cst != nil {
 				return true, name + ".iso", udpfs.StatInfoFromFile(cst), nil
 			}

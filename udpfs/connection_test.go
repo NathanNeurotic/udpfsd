@@ -725,3 +725,24 @@ func TestListingInvalidCompressedImage(t *testing.T) {
 		t.Fatalf("listing: %+v, want %+v", got, want)
 	}
 }
+
+// OPEN finds a compressed image by <name>.iso whatever the case of its
+// extension, so the listing has to show it under that name too
+func TestListingUpperCaseCompressedImage(t *testing.T) {
+	p := newPeer(t, fs.WithCompression())
+	p.copyTestImage("test.cso", "GAME.CSO")
+	p.copyTestImage("test.zso", "GAME2.ZsO")
+	want := []dirEntry{
+		{"GAME.CSO.iso", udpfs.FIO_S_IFREG, 1110016},
+		{"GAME2.ZsO.iso", udpfs.FIO_S_IFREG, 1110016},
+	}
+	got := p.list("")
+	if !slices.Equal(got, want) {
+		t.Fatalf("listing: %+v, want %+v", got, want)
+	}
+	for _, e := range got {
+		if h := p.open(e.name, fioRdonly); h <= 0 {
+			t.Errorf("OPEN %s: %d", e.name, h)
+		}
+	}
+}
